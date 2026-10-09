@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# netspeed 啟動器 (不需安裝即可執行)
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if command -v python3 >/dev/null 2>&1; then
+    py=python3
+else
+    py=python
+fi
+exec "$py" "$here/netspeed.py" "$@"
