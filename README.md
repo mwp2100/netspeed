@@ -279,3 +279,9 @@ netspeed theme import my-theme.json     # 匯入他人主題
 - **Ping 顯示「無回應」**：ICMP 需要權限；無權限時會自動退回系統 `ping`。可用
   `netspeed ping <目標> --method system` 強制使用系統 ping。
 - **Cloudflare 上下載出現 `n/a`**：多為當下網路或連線被中斷，重跑即可。
+
+---
+
+## 授權
+
+本專案採用 [MIT License](LICENSE)。
