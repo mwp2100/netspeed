@@ -210,17 +210,18 @@ netspeed history --kind pair
 - `n` = 稍後
 - `s` = 此版本不再通知（之後若有更新版本才會再提示）
 
-先在設定裡指定你的 repo（需先把 `netspeed.py` 發佈到 GitHub，release 的 tag 用 `v1.0.0` 這種格式）：
+更新來源預設為 **`mwp2100/netspeed`**，開箱即會檢查，不需設定。若要指向自己的 fork：
 
 ```bash
-netspeed set update.repo <你的帳號>/<repo>
+netspeed set update.repo <你的帳號>/<repo>   # 換成自己的 repo
 netspeed update            # 立即檢查（強制）
 netspeed update --reset-skip   # 清除「不再通知」的版本
 netspeed set update.check_on_start false   # 關閉啟動時自動檢查
 netspeed set update.interval_hours 24      # 檢查頻率（小時）
 ```
 
-未設定 `update.repo` 時不會做任何檢查。也可用 `--no-update-check` 只略過單次。
+將 `update.repo` 設為空字串即可完全關閉檢查；也可用 `--no-update-check` 只略過單次。
+發佈 release 的 tag 用 `v1.1.0` 這種格式即可。
 
 ---
 

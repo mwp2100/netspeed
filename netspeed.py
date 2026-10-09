@@ -41,7 +41,7 @@ import threading
 import time
 import urllib.request
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 APP = "netspeed"
 PROTO_TAG = "NETSPEED1"
 
@@ -210,7 +210,7 @@ DEFAULT_CONFIG = {
         "max": 300,
     },
     "update": {
-        "repo": "",              # GitHub "owner/repo", 空 = 不檢查
+        "repo": "mwp2100/netspeed",   # GitHub "owner/repo", 空 = 不檢查
         "check_on_start": True,
         "interval_hours": 24,
         "skip_version": "",
