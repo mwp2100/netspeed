@@ -3,6 +3,9 @@
 單一 Python 檔案，支援 **Windows / macOS / Linux**。可對多個來源測速、兩端對測、ping、
 查外網 IP 與電信商，並把結果整理成統整報告，歷史紀錄可挑選重跑。
 
+- **中英文語系**：內建 **English / 繁體中文**，預設英文，可隨時切換（見第 13 節）。
+- **執行時顯示版本**：每次執行都會在開頭顯示目前版號（例如 `netspeed v1.4.0`）。
+
 ---
 
 ## 1. 系統需求
@@ -10,7 +13,8 @@
 - **Python 3.8+**（已內建於多數系統；Windows 可從 <https://www.python.org/downloads/> 安裝，
   安裝時勾選「Add Python to PATH」）。
 - 免安裝任何套件即可使用 **Cloudflare 測速、外網 IP/電信商、Ping**（皆為內建實作）。
-- 其餘測速來源為**選用**，用到時才需要對應的外部工具（見第 8 節）。
+- 其餘測速來源為**選用**，用到時才需要對應的外部工具（見第 8 節）。可用 `speed check`
+  檢查並協助下載缺少的執行檔。
 
 ---
 
@@ -35,11 +39,14 @@ irm https://raw.githubusercontent.com/mwp2100/netspeed/main/netspeed.py -OutFile
 ```bash
 python netspeed.py            # 不帶參數 → 倒數後跑預設測速
 python netspeed.py console    # 進入互動 console（shell 亦可）
-python netspeed.py speed all  # 帶參數 → 直接執行該指令
+python netspeed.py all        # 外網 IP + Ping + 全部來源 統整報告
+python netspeed.py speed all  # 只跑全部測速來源（不含 ip / ping）
 ```
 
-**不帶參數**會先顯示「將以預設設定執行」並**倒數 5 秒**；倒數中：
+**不帶參數**會先顯示「將以預設設定執行」並**倒數 5 秒**；倒數畫面會顯示
+「倒數 N 秒...（按 Enter 直接執行, c 進互動模式）」：
 
+- 按 **Enter** → 立即開始測試
 - 按 `c` → 進入互動 console
 - 按**其他任一鍵** → 取消
 - 不按鍵 → 倒數結束後跑預設測速（外網 IP + Ping + 全部來源）
@@ -50,22 +57,24 @@ python netspeed.py speed all  # 帶參數 → 直接執行該指令
 
 ```bash
 # netspeed> help
-# netspeed> show net
+# netspeed> show interfaces
 # netspeed> speed cloudflare
 # netspeed> exit
 ```
 
 輸入時的輔助：
 
-- 打 `sh` 再按 `?` → 列出 `show`；打 `s` 會列出 `speed`、`show`。
-- 接著打 `o`（變成 `sho`）按 `Tab` → 自動補成 `show`。
-- 若輸入已是完整指令（例如 `show`），直接 `Enter` 就會執行；`Tab` 補齊後 `Enter` 也直接執行。
-- **參數也能補齊**：`show ` 會列出 `config/ip/net/tools/...`；`speed ` 會列出 `all/mlab/fast/...`；
-  `netinfo ` 會列出可選介面與選項；`config ` 會列出子指令。輸入部分字元再按 `?` 會依前綴篩選。
-- 較慢的讀取（`netinfo`、`check`、`ip`）第一次執行後會**快取**，之後在同一 console 內立即回應；
+- **指令前綴自動補齊**：送出時若只打了唯一前綴，會自動視為完整指令，例如
+  `in` → `install`、`wr` → `write`、`sho` → `show`。
+- 打 `sh` 再按 `?` → 列出 `show` 相關；接著按 `Tab` 會自動補齊。
+- 若輸入已是完整指令（例如 `show`），直接 `Enter` 就會執行。
+- **參數也能補齊**：`show ` 會列出 `ping/tools/env/interfaces/...`；`speed ` 會列出
+  `all/mlab/fast/cloudflare/ookla/libre/check`；`ip ` 會列出 `--provider` 等選項。
+- 若指令後面**沒有可補的參數**，按 `Tab` 或 `?` 只會跳一行空白，不會多印訊息。
+- 較慢的讀取（`netinfo`、`show tools`、`show env`、`ip`）第一次執行後會**快取**；
   要強制重讀用 `--refresh` 或輸入 `refresh` 清快取。
 - **歷史與游標**：按 `↑`/`↓` 叫回上/下一筆指令，`←`/`→` 移動游標，`Home`/`End` 到行首/行尾，`Delete` 刪除。
-- 按 `?` 若沒有任何符合項目，只會跳一行，不會多印訊息。
+- 打 `?` 若沒有任何符合項目，只會跳一行，不會多印訊息。
 
 ---
 
@@ -135,16 +144,20 @@ python3 netspeed.py uninstall --purge    # macOS / Linux
 netspeed                        倒數後跑預設測速（外網IP + Ping + 全部來源）
 netspeed console                進入互動模式（shell 亦可）
 
-netspeed speed all              測速：全部來源 → 統整報告
+netspeed all                    外網 IP + Ping + 全部來源 → 統整報告
+netspeed speed all              只跑全部測速來源（不含 ip / ping）
 netspeed speed mlab|fast|cloudflare|ookla|libre
-netspeed ping [目標...]         直接 ping（標頭會顯示目前參數）
+netspeed speed check            檢查測速工具，可協助下載缺少的執行檔
+netspeed ping [目標...]         直接 ping（標頭會顯示目前參數與 gateway）
 netspeed ping                   不帶目標時進入互動選單（見下）
 
-netspeed show ip                外網 IP 與電信商
-netspeed show net               本機網路設定（DHCP/靜態、IP/遮罩、閘道、靜態路由、Sub IP）
-netspeed show tools             檢查各來源工具是否可用（含下載網址）
-netspeed show config|targets|endpoints|theme|history|version
-netspeed netinfo [介面] [--all] [-i] [--refresh]   等同 show net
+netspeed ip [-p provider]       外網 IP 與電信商（預設 ipinfo.io，可切換）
+netspeed show ping              Ping 設定（含目前 gateway 值）
+netspeed show tools             工具狀態（* = 執行 all 時會跑；分 ping / 測速 / 對測）
+netspeed show env               環境狀態檢查（Python / 設定目錄 / 網際網路）
+netspeed show interfaces        本機網路設定（DHCP/IP/閘道/靜態路由/Sub IP）
+netspeed show config|theme|history|version
+netspeed netinfo [介面] [--all] [-i] [--refresh]   等同 show interfaces
 
 netspeed pair serve             開對測伺服器（優先 iperf3，否則內建）
 netspeed pair client <host>     連到對測端（下載/上傳/雙向）
@@ -152,35 +165,37 @@ netspeed pair history           對測歷史
 
 netspeed config show|path|edit|reset|export|import   設定檔（可匯出/匯入分享）
 netspeed config set <key> <value>   例: config set iperf.path /usr/local/bin/iperf3
+netspeed config set lang zh-TW      切換語系（en / zh-TW）
 netspeed config get <key>
 netspeed config targets [list|add|del|set|gateway]
 netspeed config endpoints [list|set <來源> <值>]
 netspeed config theme [list|set|reset|preset|export|import]
-netspeed history                歷史紀錄，可輸入編號直接重跑
+netspeed history                歷史紀錄，輸入編號可查看內容並重跑
 
 netspeed update [--reset-skip]  檢查/更新到最新版本（來源: update.repo）
 netspeed version                顯示版本
 netspeed install [-y] | uninstall [--purge] [-y]
 
 # Cisco 風格（console 內）
-netspeed> show config           等同 config（也支援 show ip / show tools / show conf 縮寫）
+netspeed> show ping             顯示 Ping 設定（含 gateway）
+netspeed> show tools / show env / show interfaces
 netspeed> configure             進入設定模式（提示字元變 netspeed(config)#）
 ```
 
 > 為精簡 top-level 項目，以下平鋪指令**仍可用但不在 help 顯示**，建議改用分層寫法：
-> `all`/`mlab`/`fast`/`cloudflare`/`ookla`/`libre` → `speed <x>`；
+> `mlab`/`fast`/`cloudflare`/`ookla`/`libre` → `speed <x>`；
 > `set`/`get`/`targets`/`endpoints`/`theme` → `config <x>`。
-> `ip`、`check`、`netinfo` 仍為 top-level，也有 `show ip`/`show tools`/`show net` 等別名。
+> `ip`、`check`、`netinfo` 仍為 top-level，也有 `show tools`/`show interfaces` 等別名。
 
 常用選項：`--json`、`--no-color`、`--no-save`、`--config <path>`、`--no-update-check`。
 
 ### Ping 標頭與互動選單
 
-直接 `ping` 時，標頭會帶出目前使用的參數：
+直接 `ping` 時，標頭會帶出目前使用的參數**與目前偵測到的 default gateway**：
 
 ```
 ================================================================
-  Ping 測試 count:5 interval:1.0 timeout:2.0 size:56
+  Ping 測試 count:5 interval:1.0 timeout:2.0 size:56 gateway:192.168.1.1
 ================================================================
 ```
 
@@ -201,10 +216,19 @@ netspeed> configure             進入設定模式（提示字元變 netspeed(co
     [3] 參數                # count / interval / timeout / size / method
 ```
 
+### 測速工具檢查（speed check）
+
+`speed check` 會列出各測速來源的執行檔狀態，若有缺少，會詢問是否**協助自動下載**
+（GitHub Releases 類型會下載對應平台檔案到 netspeed 安裝目錄；fast.com 會嘗試 `npm install -g`；
+其餘則顯示官方下載網址）。按任一鍵即返回上層。加 `-y` 可略過詢問直接嘗試下載。
+
 ### 範例
 
 ```bash
-netspeed show tools                                  # 檢查工具
+netspeed speed check                                 # 檢查/下載測速工具
+netspeed show tools                                  # 檢查工具 (* = all 會執行)
+netspeed show env                                    # 環境狀態檢查
+netspeed ip -p ip-api.com                            # 換 IP 查詢來源
 netspeed netinfo                                     # 自動顯示有 default route 的介面
 netspeed netinfo -i                                  # 互動選單選介面 (Enter/q 離開)
 netspeed netinfo --all --json
@@ -229,8 +253,10 @@ netspeed history --kind pair
 | macOS | `~/Library/Application Support/netspeed/` |
 | Linux | `~/.config/netspeed/`（或 `$XDG_CONFIG_HOME/netspeed`） |
 
-- `config.json`：所有設定（ping 清單/參數、測速端點、iperf 路徑、啟用來源）。
-- `history.jsonl`：歷史紀錄（每行一筆，可用 `netspeed history` 挑選重跑）。
+- `config.json`：所有設定（語系、ping 清單/參數、測速端點、iperf 路徑、啟用來源）。
+- `history.jsonl`：歷史紀錄。**每次操作視為一筆**：一次 `ping`（即使多個目標）、一次
+  `speed`（多個來源）、一次 `all` 都各存成一筆；`show history` 每筆一行，輸入編號可進入
+  查看完整結果並選擇重跑。
 
 以 `netspeed config edit` 可直接用編輯器修改全部設定。
 
@@ -256,7 +282,8 @@ netspeed history --kind pair
 2. **直接放在 `netspeed` 同層目錄**（也就是 `netspeed.py` 所在的資料夾）——netspeed 會自動找到。
 
 找不到工具時，該來源會顯示提示與下載網址，其餘功能不受影響。iperf3 也可用
-`netspeed set iperf.path <路徑>` 指定自訂執行檔位置。用 `netspeed check` 可隨時查看狀態與下載連結。
+`netspeed set iperf.path <路徑>` 指定自訂執行檔位置。用 `netspeed speed check` 可隨時查看
+狀態並**協助下載**缺少的執行檔；`netspeed show tools` 則以 `*` 標示哪些項目在執行 `all` 時會一併執行。
 
 ---
 
@@ -289,11 +316,15 @@ netspeed set update.interval_hours 24      # 檢查頻率（小時）
 
 ```
 netspeed> show config          # = 原本的 config
-netspeed> show ip              # = netinfo
+netspeed> show ping            # Ping 設定（含目前 gateway）
+netspeed> show tools           # 工具狀態（* = all 會執行）
+netspeed> show env             # 環境狀態檢查
+netspeed> show interfaces      # = netinfo
 netspeed> show conf            # 支援縮寫（唯一前綴）
 netspeed> show                  # 列出所有可用 show 項目
 netspeed> configure            # 進入設定模式（或打 conf）
 netspeed(config)# set ping.count 10
+netspeed(config)# set lang zh-TW
 netspeed(config)# endpoints set ookla 12345
 netspeed(config)# theme set ok magenta
 netspeed(config)# no ping.count        # 還原該項為預設
@@ -306,9 +337,10 @@ netspeed(config)# end                  # 離開（或 exit）
 
 - 設定模式內變更**即時套用**（當下就生效），但**要 `write` 才會寫入檔案**；
   若沒 `write` 就 `end`，會提醒你「下次執行仍為舊設定」。
-- `show` 對應表：`config`/`running-config` → `config`，`ip`/`interfaces` → `netinfo`，
-  `tools` → `check`，另有 `targets`、`endpoints`、`theme`、`history`、`version`、`speed`。
+- `show` 對應表：`config` → `config`，`ping` → Ping 設定，`tools` → 工具狀態，
+  `env` → 環境狀態，`interfaces` → `netinfo`，另有 `theme`、`history`、`version`。
 - 直接下 `netspeed show config` 也可以（不必進 console）。
+- 指令前綴會自動補齊：`sho` → `show`、`conf` → `configure`、`wr` → `write`、`in` → `install`。
 
 ---
 
@@ -338,6 +370,30 @@ netspeed theme import my-theme.json     # 匯入他人主題
 - **Ping 顯示「無回應」**：ICMP 需要權限；無權限時會自動退回系統 `ping`。可用
   `netspeed ping <目標> --method system` 強制使用系統 ping。
 - **Cloudflare 上下載出現 `n/a`**：多為當下網路或連線被中斷，重跑即可。
+
+---
+
+## 13. 語系（Language）
+
+內建 **English** 與 **繁體中文** 兩種語系，**預設為 English**。語系為程式內建，不需額外語系檔。
+
+```bash
+netspeed config lang zh-TW         # 切換繁體中文
+netspeed config set lang zh-TW     # 同上（等價寫法）
+netspeed config lang en            # 切換英文（預設）
+netspeed config lang               # 查看目前語系
+```
+
+也可在 console 的設定模式內調整：
+
+```
+netspeed> configure
+netspeed(config)# set lang zh-TW
+netspeed(config)# write
+```
+
+設定值存於 `config.json` 的 `lang` 欄位（`en` 或 `zh-TW`）。指令、提示、錯誤訊息與報表
+標題都會依語系顯示；`help`、`show` 各項目與互動選單亦同。
 
 ---
 

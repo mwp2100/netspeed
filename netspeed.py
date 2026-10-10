@@ -13,15 +13,19 @@ netspeed — 跨平台 CLI 網路測速工具箱 (Windows / macOS / Linux)
   * 統整報告: 外網 IP/ISP + ping 統計 + 各來源測速
 
 執行:
-  netspeed                     顯示說明並詢問是否以預設方式測速
-  netspeed all                 全部來源 + ping + 外網 IP
-  netspeed mlab|fast|cloudflare|ookla|libre
+  netspeed                     倒數後跑預設測速 (Enter 可直接開始)
+  netspeed all                 外網 IP + ping + 測速 統整報告
+  netspeed speed all           只跑全部測速來源 (不含 ip/ping)
+  netspeed speed mlab|fast|cloudflare|ookla|libre
+  netspeed speed check         檢查測速工具並可協助下載缺少的執行檔
   netspeed ping [targets...]
-  netspeed ip
+  netspeed ip [-p provider]    外網 IP (預設 ipinfo.io, 可切換)
   netspeed pair serve|client <host>|history
-  netspeed history
-  netspeed config|set|get|targets|endpoints
+  netspeed history             歷史紀錄 (每次操作一筆, 可進入查看)
+  netspeed config|set|get|targets|endpoints|theme
+  netspeed console             互動模式 (指令前綴自動補齊)
 
+語系: 內建 English / 繁體中文, 預設英文 (config set lang zh-TW)。
 設定檔與歷史紀錄位於使用者設定目錄下的 netspeed/ 資料夾。
 """
 
@@ -41,11 +45,35 @@ import threading
 import time
 import urllib.request
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 APP = "netspeed"
 PROTO_TAG = "NETSPEED1"
 
 USE_COLOR = True
+
+# --------------------------------------------------------------------------- #
+# 語系 (i18n) — 程式內帶, 預設英文; 可用 config lang 切換
+# --------------------------------------------------------------------------- #
+
+LANG = "en"
+LANG_NAMES = {"en": "English", "zh-TW": "繁體中文"}
+
+
+def _norm_lang(value) -> str:
+    s = str(value or "").strip().lower().replace("_", "-")
+    if s in ("zh", "zh-tw", "zh-hant", "zh-hant-tw", "tw", "cht", "chinese", "traditional"):
+        return "zh-TW"
+    return "en"
+
+
+def t(zh: str, en: str) -> str:
+    """回傳目前語系的字串; 預設語系為英文。"""
+    return en if LANG == "en" else zh
+
+
+def apply_lang(cfg: dict) -> None:
+    global LANG
+    LANG = _norm_lang(cfg.get("lang", "en"))
 
 # --------------------------------------------------------------------------- #
 # 基本工具
@@ -136,6 +164,7 @@ def tcol(text: str, key: str) -> str:
 def apply_theme(cfg: dict) -> None:
     global THEME
     THEME = deep_merge(DEFAULT_THEME, cfg.get("theme", {}) or {})
+    apply_lang(cfg)
 
 
 def section(title: str) -> None:
@@ -175,6 +204,7 @@ def cache_clear() -> None:
 # --------------------------------------------------------------------------- #
 
 DEFAULT_CONFIG = {
+    "lang": "en",                  # en | zh-TW (預設英文)
     "ping": {
         "method": "auto",          # auto | icmp | system
         "count": 5,
@@ -204,6 +234,9 @@ DEFAULT_CONFIG = {
         "cloudflare": "https://speed.cloudflare.com",
         "ookla": "",               # Ookla server id (空 = 自動選)
         "libre": "",               # LibreSpeed 伺服器 URL (空 = 自動選)
+    },
+    "ip": {
+        "provider": "ipinfo.io",   # ipinfo.io | ifconfig.co | ip-api.com
     },
     "sources": ["mlab", "fast", "cloudflare", "ookla", "libre"],
     "history": {
@@ -240,7 +273,7 @@ def load_config(path: str | None = None) -> dict:
         with open(p, "r", encoding="utf-8") as fh:
             data = json.load(fh)
     except Exception as exc:
-        warn(f"設定檔讀取失敗 ({exc}), 使用預設值")
+        warn(t(f"設定檔讀取失敗 ({exc}), 使用預設值", f"Failed to read config ({exc}), using defaults"))
         return json.loads(json.dumps(DEFAULT_CONFIG))
     return deep_merge(DEFAULT_CONFIG, data)
 
@@ -418,16 +451,25 @@ def _http_get(url: str, timeout: float = 8.0) -> str:
         return resp.read().decode("utf-8", errors="replace")
 
 
-def lookup_ip_isp() -> dict:
-    result = {"ip": None, "isp": None, "asn": None, "org": None,
-              "city": None, "country": None, "source": None}
+IP_PROVIDERS = {
+    "ipinfo.io": "https://ipinfo.io/json",
+    "ifconfig.co": "https://ifconfig.co/json",
+    "ip-api.com": "http://ip-api.com/json",
+}
+DEFAULT_IP_PROVIDER = "ipinfo.io"
 
-    providers = [
-        ("ipinfo.io", "https://ipinfo.io/json"),
-        ("ifconfig.co", "https://ifconfig.co/json"),
-        ("ip-api.com", "http://ip-api.com/json"),
-    ]
-    for name, url in providers:
+
+def lookup_ip_isp(provider: str | None = None) -> dict:
+    result = {"ip": None, "isp": None, "asn": None, "org": None,
+              "city": None, "country": None, "source": None, "provider": None}
+
+    chosen = (provider or "").strip().lower()
+    if chosen not in IP_PROVIDERS:
+        chosen = DEFAULT_IP_PROVIDER
+    order = [chosen] + [k for k in IP_PROVIDERS if k != chosen]
+
+    for name in order:
+        url = IP_PROVIDERS[name]
         try:
             data = json.loads(_http_get(url))
         except Exception:
@@ -464,6 +506,7 @@ def lookup_ip_isp() -> dict:
                 source=name,
             )
         if result.get("ip"):
+            result["provider"] = name
             return result
 
     # 最後備援: 只取 IP
@@ -471,6 +514,7 @@ def lookup_ip_isp() -> dict:
         try:
             result["ip"] = _http_get(url).strip()
             result["source"] = url.split("/")[2]
+            result["provider"] = "fallback"
             break
         except Exception:
             continue
@@ -652,7 +696,8 @@ def ping_target(host: str, cfg: dict, count=None, interval=None,
             return icmp_ping(host, count, interval, timeout, size)
         except (PermissionError, OSError, RuntimeError) as exc:
             if method == "icmp":
-                warn(f"ICMP ping 失敗 ({exc}), 改用系統 ping")
+                warn(t(f"ICMP ping 失敗 ({exc}), 改用系統 ping",
+                       f"ICMP ping failed ({exc}), falling back to system ping"))
             return system_ping(host, count, interval, timeout, size)
     return system_ping(host, count, interval, timeout, size)
 
@@ -699,7 +744,7 @@ def resolve_ping_targets(cfg: dict, extra: list, use_gateway: bool = True,
         if gw:
             targets.append(gw)
         else:
-            warn("偵測不到 default gateway")
+            warn(t("偵測不到 default gateway", "Default gateway not detected"))
     if include_config:
         for t in pc.get("targets", []):
             if t not in targets:
@@ -784,7 +829,7 @@ def _parse_speed_numbers(text: str) -> dict:
 def run_mlab(cfg: dict, extra: list) -> dict:
     tool = find_tool("ndt7-client")
     if not tool:
-        return {"source": "mlab", "error": "找不到 ndt7-client"}
+        return {"source": "mlab", "error": t("找不到 ndt7-client", "ndt7-client not found")}
     cmd = [tool]
     server = get_dotted(cfg, "endpoints.mlab")
     if server:
@@ -800,7 +845,7 @@ def run_mlab(cfg: dict, extra: list) -> dict:
 def run_fast(cfg: dict, extra: list, upload: bool = False) -> dict:
     tool = find_tool("fast")
     if not tool:
-        return {"source": "fast", "error": "找不到 fast-cli (npm install -g fast-cli)"}
+        return {"source": "fast", "error": t("找不到 fast-cli (npm install -g fast-cli)", "fast-cli not found (npm install -g fast-cli)")}
     cmd = [tool, "--json"]
     if upload:
         cmd.append("--upload")
@@ -821,7 +866,7 @@ def run_fast(cfg: dict, extra: list, upload: bool = False) -> dict:
 def run_ookla(cfg: dict, extra: list) -> dict:
     tool = find_tool(["speedtest", "ookla"])
     if not tool:
-        return {"source": "ookla", "error": "找不到 Ookla speedtest CLI"}
+        return {"source": "ookla", "error": t("找不到 Ookla speedtest CLI", "Ookla speedtest CLI not found")}
     cmd = [tool, "--accept-license", "--accept-gdpr", "--format=json"]
     sid = get_dotted(cfg, "endpoints.ookla")
     if sid:
@@ -851,7 +896,7 @@ def run_ookla(cfg: dict, extra: list) -> dict:
 def run_libre(cfg: dict, extra: list) -> dict:
     tool = find_tool("librespeed-cli")
     if not tool:
-        return {"source": "libre", "error": "找不到 librespeed-cli"}
+        return {"source": "libre", "error": t("找不到 librespeed-cli", "librespeed-cli not found")}
     cmd = [tool, "--json"]
     server = get_dotted(cfg, "endpoints.libre")
     if server:
@@ -902,7 +947,7 @@ def run_source(name: str, cfg: dict, args=None) -> dict:
         return run_ookla(cfg, [])
     if name == "libre":
         return run_libre(cfg, [])
-    return {"source": name, "error": f"未知來源 {name}"}
+    return {"source": name, "error": t(f"未知來源 {name}", f"unknown source {name}")}
 
 
 def print_speed_result(res: dict) -> None:
@@ -915,10 +960,12 @@ def print_speed_result(res: dict) -> None:
     ul = res.get("upload")
     lat = res.get("latency")
     parts = [f"{label}:"]
-    parts.append(f"下載 {dl:8.2f} Mbps" if dl is not None else "下載   n/a")
-    parts.append(f"上傳 {ul:8.2f} Mbps" if ul is not None else "上傳   n/a")
+    parts.append(t(f"下載 {dl:8.2f} Mbps", f"down {dl:8.2f} Mbps") if dl is not None
+                 else t("下載   n/a", "down   n/a"))
+    parts.append(t(f"上傳 {ul:8.2f} Mbps", f"up   {ul:8.2f} Mbps") if ul is not None
+                 else t("上傳   n/a", "up     n/a"))
     if lat is not None:
-        parts.append(f"延遲 {lat:.1f} ms")
+        parts.append(t(f"延遲 {lat:.1f} ms", f"lat {lat:.1f} ms"))
     print("  " + "  ".join(parts))
 
 
@@ -978,8 +1025,9 @@ def builtin_serve(host: str, port: int) -> None:
     srv.bind((host, port))
     srv.listen(5)
     srv.settimeout(0.5)
-    print(col(f"[內建對測伺服器] 監聽 {host}:{port}  (Ctrl+C 結束)", "green"))
-    print("等待對測端連線...")
+    print(col(t(f"[內建對測伺服器] 監聽 {host}:{port}  (Ctrl+C 結束)",
+                f"[Builtin pair server] listening on {host}:{port}  (Ctrl+C to stop)"), "green"))
+    print(t("等待對測端連線...", "Waiting for peer connection..."))
     try:
         while True:
             try:
@@ -993,12 +1041,12 @@ def builtin_serve(host: str, port: int) -> None:
         pass
     finally:
         srv.close()
-    print("\n伺服器結束。")
+    print(t("\n伺服器結束。", "\nServer stopped."))
 
 
 def _builtin_handle(conn: socket.socket, addr) -> None:
     peer = f"{addr[0]}:{addr[1]}"
-    print(col(f"\n-> 連線來自 {peer}  ({now_iso()})", "cyan"))
+    print(col(t(f"\n-> 連線來自 {peer}  ({now_iso()})", f"\n-> connection from {peer}  ({now_iso()})"), "cyan"))
     conn.settimeout(30)
     buf = bytearray()
     line = _recv_line(conn, buf)
@@ -1020,7 +1068,8 @@ def _builtin_handle(conn: socket.socket, addr) -> None:
                 total += len(chunk)
             dt = time.time() - t0
             mbps = total * 8 / 1e6 / dt if dt > 0 else 0
-            print(f"   下載 {mbps:8.2f} Mbps  (傳給 {peer})")
+            print(t(f"   下載 {mbps:8.2f} Mbps  (傳給 {peer})",
+                    f"   down {mbps:8.2f} Mbps  (to {peer})"))
         elif mode == "up":
             total = 0
             t0 = time.time()
@@ -1036,7 +1085,8 @@ def _builtin_handle(conn: socket.socket, addr) -> None:
                     break
             dt = time.time() - t0
             mbps = total * 8 / 1e6 / dt if dt > 0 else 0
-            print(f"   上傳 {mbps:8.2f} Mbps  (來自 {peer})")
+            print(t(f"   上傳 {mbps:8.2f} Mbps  (來自 {peer})",
+                    f"   up   {mbps:8.2f} Mbps  (from {peer})"))
             try:
                 conn.sendall(f"RESULT {total}\n".encode())
             except OSError:
@@ -1054,7 +1104,7 @@ def _builtin_measure_down(host: str, port: int, seconds: float) -> float | None:
     try:
         s = socket.create_connection((host, port), timeout=10)
     except OSError as exc:
-        warn(f"無法連線 {host}:{port} ({exc})")
+        warn(t(f"無法連線 {host}:{port} ({exc})", f"Cannot connect {host}:{port} ({exc})"))
         return None
     s.sendall(f"{PROTO_TAG} down {seconds}\n".encode())
     total = 0
@@ -1079,7 +1129,7 @@ def _builtin_measure_up(host: str, port: int, seconds: float) -> float | None:
     try:
         s = socket.create_connection((host, port), timeout=10)
     except OSError as exc:
-        warn(f"無法連線 {host}:{port} ({exc})")
+        warn(t(f"無法連線 {host}:{port} ({exc})", f"Cannot connect {host}:{port} ({exc})"))
         return None
     s.sendall(f"{PROTO_TAG} up {seconds}\n".encode())
     chunk = b"\x00" * (1 << 20)
@@ -1143,10 +1193,12 @@ def run_pair_client(host: str, cfg: dict, args) -> dict:
         method = "iperf3" if iperf_path else "builtin"
 
     if method == "iperf3" and not iperf_path:
-        warn("找不到 iperf3, 改用內建對測")
+        warn(t("找不到 iperf3, 改用內建對測", "iperf3 not found, using builtin pair"))
         method = "builtin"
 
-    print(col(f"[對測] 目標 {host}:{port}  方式={method}  模式={mode}  秒數={duration}", "cyan"))
+    print(col(t(f"[對測] 目標 {host}:{port}  方式={method}  模式={mode}  秒數={duration}",
+                f"[Pair] target {host}:{port}  method={method}  mode={mode}  seconds={duration}"),
+              "cyan"))
     t0 = time.time()
     if method == "iperf3":
         res = iperf_client(host, port, duration, streams, mode, iperf_path)
@@ -1165,19 +1217,22 @@ def run_pair_client(host: str, cfg: dict, args) -> dict:
 
 
 def print_ip_section(ipinfo: dict) -> None:
-    section("外網 IP / 線路")
-    print(f"  外網 IP : {col(ipinfo.get('ip') or 'n/a', 'bold')}")
+    section(t("外網 IP / 線路", "Public IP / Line"))
+    print(f"  {t('外網 IP', 'Public IP')} : {col(ipinfo.get('ip') or 'n/a', 'bold')}")
     isp = ipinfo.get("isp") or ipinfo.get("org") or "n/a"
     asn = ipinfo.get("asn") or ""
-    print(f"  電信商  : {isp} {('(' + asn + ')') if asn else ''}".rstrip())
+    print(f"  {t('電信商', 'ISP')}  : {isp} {('(' + asn + ')') if asn else ''}".rstrip())
     loc = ", ".join(x for x in (ipinfo.get("city"), ipinfo.get("country")) if x)
     if loc:
-        print(f"  地區    : {loc}")
-    print(f"  來源    : {ipinfo.get('source') or 'n/a'}")
+        print(f"  {t('地區', 'Location')}  : {loc}")
+    print(f"  {t('來源', 'Source')}  : {ipinfo.get('source') or 'n/a'}"
+          + (f"  ({t('提供者', 'provider')}: {ipinfo.get('provider')})" if ipinfo.get("provider") else ""))
 
 
 def print_ping_table(results: list) -> None:
-    header = f"  {'目標':<20} {'傳送':>4} {'接收':>4} {'遺失':>6} {'min':>7} {'avg':>7} {'max':>7} {'mdev':>7} {'jitter':>7}  方式"
+    header = (f"  {t('目標', 'Target'):<20} {t('傳送', 'Sent'):>4} {t('接收', 'Recv'):>4} "
+              f"{t('遺失', 'Loss'):>6} {'min':>7} {'avg':>7} {'max':>7} {'mdev':>7} "
+              f"{'jitter':>7}  {t('方式', 'Method')}")
     print(col(header, "bold"))
     print("  " + "-" * 96)
 
@@ -1186,7 +1241,7 @@ def print_ping_table(results: list) -> None:
 
     for r in results:
         if r.get("error"):
-            print(f"  {r['target']:<20} {col('失敗: ' + r['error'], 'red')}")
+            print(f"  {str(r.get('target')):<20} {col(t('失敗: ', 'failed: ') + str(r['error']), 'red')}")
             continue
         loss = r.get("loss")
         loss_s = f"{loss:5.1f}%" if isinstance(loss, (int, float)) else "  n/a"
@@ -1196,8 +1251,9 @@ def print_ping_table(results: list) -> None:
 
 
 def print_speed_table(results: list) -> None:
-    section("測速結果 (Mbps)")
-    header = f"  {'來源':<22} {'下載':>10} {'上傳':>10} {'延遲(ms)':>10}  節點"
+    section(t("測速結果 (Mbps)", "Speed results (Mbps)"))
+    header = (f"  {t('來源', 'Source'):<22} {t('下載', 'Down'):>10} {t('上傳', 'Up'):>10} "
+              f"{t('延遲(ms)', 'Latency(ms)'):>10}  {t('節點', 'Server')}")
     print(col(header, "bold"))
     print("  " + "-" * 80)
     dls = []
@@ -1205,7 +1261,7 @@ def print_speed_table(results: list) -> None:
     for r in results:
         src = SOURCE_LABELS.get(r.get("source"), r.get("source"))
         if r.get("error"):
-            print(f"  {src:<22} {col(r['error'], 'yellow')}")
+            print(f"  {str(src):<22} {col(str(r['error']), 'yellow')}")
             continue
         dl = r.get("download")
         ul = r.get("upload")
@@ -1217,25 +1273,26 @@ def print_speed_table(results: list) -> None:
         dl_s = f"{dl:10.2f}" if dl is not None else f"{'n/a':>10}"
         ul_s = f"{ul:10.2f}" if ul is not None else f"{'n/a':>10}"
         lat_s = f"{lat:10.1f}" if lat is not None else f"{'n/a':>10}"
-        print(f"  {src:<22} {dl_s} {ul_s} {lat_s}  {r.get('server') or ''}")
+        print(f"  {str(src):<22} {dl_s} {ul_s} {lat_s}  {r.get('server') or ''}")
     print("  " + "-" * 80)
     avg_dl = f"{sum(dls)/len(dls):10.2f}" if dls else f"{'n/a':>10}"
     avg_ul = f"{sum(uls)/len(uls):10.2f}" if uls else f"{'n/a':>10}"
-    print(col(f"  {'平均':<22} {avg_dl} {avg_ul}", "bold"))
+    print(col(f"  {t('平均', 'avg'):<22} {avg_dl} {avg_ul}", "bold"))
 
 
 def print_pair_result(res: dict) -> None:
-    section("對測結果")
-    print(f"  角色    : {res.get('role')}")
-    print(f"  對端    : {res.get('peer_ip')}:{res.get('peer_port')}")
-    print(f"  方式    : {res.get('method')}")
-    print(f"  時間    : {res.get('time')}")
+    section(t("對測結果", "Pair result"))
+    print(t(f"  角色    : {res.get('role')}", f"  Role    : {res.get('role')}"))
+    print(t(f"  對端    : {res.get('peer_ip')}:{res.get('peer_port')}",
+            f"  Peer    : {res.get('peer_ip')}:{res.get('peer_port')}"))
+    print(t(f"  方式    : {res.get('method')}", f"  Method  : {res.get('method')}"))
+    print(t(f"  時間    : {res.get('time')}", f"  Time    : {res.get('time')}"))
     if res.get("download") is not None:
-        print("  下載    : " + col(f"{res['download']:.2f} Mbps", "green"))
+        print(t("  下載    : ", "  Download: ") + col(f"{res['download']:.2f} Mbps", "green"))
     if res.get("upload") is not None:
-        print("  上傳    : " + col(f"{res['upload']:.2f} Mbps", "green"))
+        print(t("  上傳    : ", "  Upload  : ") + col(f"{res['upload']:.2f} Mbps", "green"))
     if res.get("elapsed") is not None:
-        print(f"  耗時    : {res['elapsed']}s")
+        print(t(f"  耗時    : {res['elapsed']}s", f"  Elapsed : {res['elapsed']}s"))
 
 
 # --------------------------------------------------------------------------- #
@@ -1244,18 +1301,21 @@ def print_pair_result(res: dict) -> None:
 
 
 def cmd_ip(cfg: dict, args) -> dict:
-    if not getattr(args, "refresh", False) and "ip" in _SESSION_CACHE:
-        ipinfo = _SESSION_CACHE["ip"]
+    provider = getattr(args, "provider", None) or get_dotted(cfg, "ip.provider") or DEFAULT_IP_PROVIDER
+    cache_key = f"ip:{provider}"
+    if not getattr(args, "refresh", False) and cache_key in _SESSION_CACHE:
+        ipinfo = _SESSION_CACHE[cache_key]
     else:
-        ipinfo = lookup_ip_isp()
-        _SESSION_CACHE["ip"] = ipinfo
-    if args.json:
+        ipinfo = lookup_ip_isp(provider)
+        _SESSION_CACHE[cache_key] = ipinfo
+    if getattr(args, "json", False):
         print(json.dumps(ipinfo, ensure_ascii=False, indent=2))
     else:
         print_ip_section(ipinfo)
-    if not args.no_save:
+    if not getattr(args, "no_save", False):
         rec = {"kind": "ip"}
-        rec.update(ipinfo)
+        rec.update({k: ipinfo.get(k) for k in
+                    ("ip", "isp", "asn", "org", "city", "country", "source", "provider")})
         append_history(rec, cfg)
     return ipinfo
 
@@ -1271,52 +1331,70 @@ def _ping_effective(cfg: dict, args) -> dict:
     }
 
 
-def _do_ping(cfg: dict, args, targets: list) -> list:
+def _ping_gateway_text(cfg: dict, args=None) -> str:
+    if get_dotted(cfg, "ping.auto_gateway") is False or getattr(args, "no_gateway", False):
+        return t("關閉", "off")
+    gw = get_default_gateway()
+    return gw or t("無", "none")
+
+
+def _ping_header(cfg: dict, eff: dict, args=None) -> str:
+    return (t("Ping 測試", "Ping test")
+            + f" count:{eff['count']} interval:{eff['interval']} "
+              f"timeout:{eff['timeout']} size:{eff['size']} "
+              f"gateway:{_ping_gateway_text(cfg, args)}")
+
+
+def _do_ping(cfg: dict, args, targets: list, save=None) -> list:
     use_json = getattr(args, "json", False)
-    no_save = getattr(args, "no_save", False)
+    no_save = (not save) if save is not None else getattr(args, "no_save", False)
     eff = _ping_effective(cfg, args)
     if not targets:
-        error("沒有可 ping 的目標")
+        error(t("沒有可 ping 的目標", "No ping targets available"))
         return []
     if not use_json:
-        section(f"Ping 測試 count:{eff['count']} interval:{eff['interval']} "
-                f"timeout:{eff['timeout']} size:{eff['size']}")
+        section(_ping_header(cfg, eff, args))
     results = []
-    for t in targets:
+    for tg in targets:
         if not use_json:
-            print(f"  正在 ping {col(t, 'bold')} ...")
-        r = ping_target(t, cfg, eff["count"], eff["interval"], eff["timeout"],
+            print("  " + t("正在 ping {t} ...", "Pinging {t} ...").format(t=col(tg, "bold")))
+        r = ping_target(tg, cfg, eff["count"], eff["interval"], eff["timeout"],
                         eff["size"], eff["method"])
         results.append(r)
         if not use_json:
             loss = r.get("loss")
             avg = r.get("avg")
-            print(f"    -> {r.get('ip') or t}  平均 {avg:.2f} ms  遺失 {loss:.1f}%"
-                  if isinstance(avg, (int, float)) and isinstance(loss, (int, float))
-                  else f"    -> {r.get('ip') or t}  無回應")
-        if not no_save:
-            rec = {"kind": "ping", "target": t}
-            for k in ("sent", "recv", "loss", "min", "avg", "max", "mdev", "jitter"):
-                rec[k] = r.get(k)
-            append_history(rec, cfg)
+            if isinstance(avg, (int, float)) and isinstance(loss, (int, float)):
+                print("    -> " + t("{ip}  平均 {avg:.2f} ms  遺失 {loss:.1f}%",
+                                    "{ip}  avg {avg:.2f} ms  loss {loss:.1f}%").format(
+                    ip=r.get("ip") or tg, avg=avg, loss=loss))
+            else:
+                print("    -> " + t("{ip}  無回應", "{ip}  no response").format(
+                    ip=r.get("ip") or tg))
     if use_json:
         print(json.dumps(results, ensure_ascii=False, indent=2))
     else:
         print()
         print_ping_table(results)
+    if not no_save and results:
+        rec = {"kind": "ping", "params": dict(eff),
+               "targets": [{k: r.get(k) for k in
+                            ("target", "ip", "sent", "recv", "loss", "min", "avg",
+                             "max", "mdev", "jitter", "method", "error")} for r in results]}
+        append_history(rec, cfg)
     return results
 
 
 def _ping_pick_target(targets: list):
     if not targets:
-        warn("沒有目標")
+        warn(t("沒有目標", "No targets"))
         return None
-    print("  選擇目標:")
-    for i, t in enumerate(targets, 1):
-        print(f"    [{i}] {t}")
-    print(tcol("    [Enter/q] 返回", "dim"))
+    print("  " + t("選擇目標:", "Select target:"))
+    for i, tg in enumerate(targets, 1):
+        print(f"    [{i}] {tg}")
+    print(tcol("    " + t("[Enter/q] 返回", "[Enter/q] back"), "dim"))
     try:
-        choice = input(col("  請輸入: ", "bold")).strip().lower()
+        choice = input(col(t("  請輸入: ", "  Enter: "), "bold")).strip().lower()
     except (EOFError, KeyboardInterrupt):
         print()
         return None
@@ -1326,17 +1404,18 @@ def _ping_pick_target(targets: list):
 
 
 def _ping_params_menu(cfg: dict) -> None:
-    params = [("count", "次數"), ("interval", "間隔(秒)"), ("timeout", "逾時(秒)"),
-              ("size", "封包大小"), ("method", "auto|icmp|system")]
+    params = [("count", t("次數", "count")), ("interval", t("間隔(秒)", "interval(s)")),
+              ("timeout", t("逾時(秒)", "timeout(s)")), ("size", t("封包大小", "packet size")),
+              ("method", "auto|icmp|system")]
     while True:
         pc = cfg.get("ping", {})
         print()
-        print(tcol("  Ping 參數:", "heading"))
+        print(tcol("  " + t("Ping 參數:", "Ping parameters:"), "heading"))
         for i, (k, desc) in enumerate(params, 1):
             print(f"    [{i}] {k} = {pc.get(k)}   ({desc})")
-        print(tcol("    [Enter/q] 返回", "dim"))
+        print(tcol("    " + t("[Enter/q] 返回", "[Enter/q] back"), "dim"))
         try:
-            choice = input(col("  請輸入: ", "bold")).strip().lower()
+            choice = input(col(t("  請輸入: ", "  Enter: "), "bold")).strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return
@@ -1345,7 +1424,7 @@ def _ping_params_menu(cfg: dict) -> None:
         if choice.isdigit() and 1 <= int(choice) <= len(params):
             key = params[int(choice) - 1][0]
             try:
-                val = input(f"  {key} 新值: ").strip()
+                val = input(t(f"  {key} 新值: ", f"  {key} new value: ")).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 continue
@@ -1354,19 +1433,20 @@ def _ping_params_menu(cfg: dict) -> None:
                 save_config(cfg)
                 ok(f"ping.{key} = {get_dotted(cfg, f'ping.{key}')}")
         else:
-            warn("無效的選擇")
+            warn(t("無效的選擇", "Invalid choice"))
 
 
 def _ping_targets_menu(cfg: dict) -> None:
     while True:
         targets = cfg.setdefault("ping", {}).setdefault("targets", [])
         print()
-        print(tcol("  Ping 目標清單:", "heading"))
-        for i, t in enumerate(targets, 1):
-            print(f"    [{i}] {t}")
-        print(tcol("    [a] 新增   [d] 刪除   [Enter/q] 返回", "dim"))
+        print(tcol("  " + t("Ping 目標清單:", "Ping target list:"), "heading"))
+        for i, tg in enumerate(targets, 1):
+            print(f"    [{i}] {tg}")
+        print(tcol("    " + t("[a] 新增   [d] 刪除   [Enter/q] 返回",
+                              "[a] add   [d] delete   [Enter/q] back"), "dim"))
         try:
-            choice = input(col("  請輸入: ", "bold")).strip().lower()
+            choice = input(col(t("  請輸入: ", "  Enter: "), "bold")).strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return
@@ -1374,40 +1454,43 @@ def _ping_targets_menu(cfg: dict) -> None:
             return
         if choice == "a":
             try:
-                t = input("  新增目標 (IP/主機): ").strip()
+                tg = input(t("  新增目標 (IP/主機): ", "  New target (IP/host): ")).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 continue
-            if t:
-                if t not in targets:
-                    targets.append(t)
+            if tg:
+                if tg not in targets:
+                    targets.append(tg)
                 save_config(cfg)
-                ok(f"已新增 {t}")
+                ok(t("已新增 {t}", "Added {t}").format(t=tg))
         elif choice == "d":
             try:
-                n = input("  刪除編號: ").strip()
+                n = input(t("  刪除編號: ", "  Delete number: ")).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 continue
             if n.isdigit() and 1 <= int(n) <= len(targets):
                 removed = targets.pop(int(n) - 1)
                 save_config(cfg)
-                ok(f"已刪除 {removed}")
+                ok(t("已刪除 {t}", "Removed {t}").format(t=removed))
         else:
-            warn("無效的選擇")
+            warn(t("無效的選擇", "Invalid choice"))
 
 
 def _ping_settings_menu(cfg: dict) -> None:
     while True:
         pc = cfg.get("ping", {})
         print()
-        print(tcol("  修改 Ping 設定:", "heading"))
-        print(f"    [1] 預設閘道自動加入: {'on' if pc.get('auto_gateway', True) else 'off'}")
-        print(f"    [2] 目標清單 ({len(pc.get('targets', []))} 個)")
-        print("    [3] 參數 (count / interval / timeout / size / method)")
-        print(tcol("    [Enter/q] 返回", "dim"))
+        print(tcol("  " + t("修改 Ping 設定:", "Edit Ping settings:"), "heading"))
+        print("    [1] " + t("預設閘道自動加入: ", "Auto-add default gateway: ")
+              + ("on" if pc.get('auto_gateway', True) else "off"))
+        print("    [2] " + t(f"目標清單 ({len(pc.get('targets', []))} 個)",
+                              f"Target list ({len(pc.get('targets', []))})"))
+        print("    [3] " + t("參數 (count / interval / timeout / size / method)",
+                             "Parameters (count / interval / timeout / size / method)"))
+        print(tcol("    " + t("[Enter/q] 返回", "[Enter/q] back"), "dim"))
         try:
-            choice = input(col("  請輸入: ", "bold")).strip().lower()
+            choice = input(col(t("  請輸入: ", "  Enter: "), "bold")).strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return
@@ -1422,21 +1505,20 @@ def _ping_settings_menu(cfg: dict) -> None:
         elif choice == "3":
             _ping_params_menu(cfg)
         else:
-            warn("無效的選擇")
+            warn(t("無效的選擇", "Invalid choice"))
 
 
 def _ping_menu(cfg: dict, args) -> list:
     while True:
         eff = _ping_effective(cfg, args)
         print()
-        section(f"Ping 測試 count:{eff['count']} interval:{eff['interval']} "
-                f"timeout:{eff['timeout']} size:{eff['size']}")
-        print("    [1] 全部目標")
-        print("    [2] 選擇單一目標")
-        print("    [3] 修改設定")
-        print(tcol("    [Enter/q] 取消", "dim"))
+        section(_ping_header(cfg, eff, args))
+        print("    [1] " + t("全部目標", "All targets"))
+        print("    [2] " + t("選擇單一目標", "Pick a single target"))
+        print("    [3] " + t("修改設定", "Edit settings"))
+        print(tcol("    " + t("[Enter/q] 取消", "[Enter/q] cancel"), "dim"))
         try:
-            choice = input(col("  請輸入: ", "bold")).strip().lower()
+            choice = input(col(t("  請輸入: ", "  Enter: "), "bold")).strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return []
@@ -1453,7 +1535,7 @@ def _ping_menu(cfg: dict, args) -> list:
         elif choice == "3":
             _ping_settings_menu(cfg)
         else:
-            warn("無效的選擇")
+            warn(t("無效的選擇", "Invalid choice"))
 
 
 def cmd_ping(cfg: dict, args) -> list:
@@ -1467,40 +1549,75 @@ def cmd_ping(cfg: dict, args) -> list:
     return _ping_menu(cfg, args)
 
 
+def _speed_result_record(res: dict) -> dict:
+    return {k: res.get(k) for k in
+            ("source", "download", "upload", "latency", "server", "error")}
+
+
+def _speed_record(results: list) -> dict:
+    return {"kind": "speed", "results": [_speed_result_record(r) for r in results]}
+
+
+def _ip_record(ipinfo: dict) -> dict:
+    rec = {"kind": "ip"}
+    rec.update({k: ipinfo.get(k) for k in
+                ("ip", "isp", "asn", "org", "city", "country", "source", "provider")})
+    return rec
+
+
+def _resolve_sources(cfg: dict, args) -> list:
+    if getattr(args, "sources", None):
+        return [s.strip() for s in args.sources.split(",") if s.strip()]
+    return cfg.get("sources", DEFAULT_CONFIG["sources"])
+
+
 def cmd_source(name: str, cfg: dict, args) -> dict:
-    if not args.json:
-        section(f"測速 - {SOURCE_LABELS.get(name, name)}")
+    if not getattr(args, "json", False):
+        section(t("測速 - ", "Speed - ") + SOURCE_LABELS.get(name, name))
     res = run_source(name, cfg, args)
-    if not args.json:
-        print_speed_result(res)
-    else:
+    if getattr(args, "json", False):
         print(json.dumps(res, ensure_ascii=False, indent=2))
-    if not args.no_save and not res.get("error"):
-        rec = {"kind": "speed"}
-        rec.update({k: res.get(k) for k in ("source", "download", "upload", "latency", "server")})
-        append_history(rec, cfg)
+    else:
+        print_speed_result(res)
+    if not getattr(args, "no_save", False) and not res.get("error"):
+        append_history(_speed_record([res]), cfg)
     return res
 
 
-def cmd_all(cfg: dict, args) -> dict:
-    if args.sources:
-        sources = [s.strip() for s in args.sources.split(",") if s.strip()]
+def cmd_speed_all(cfg: dict, args) -> list:
+    """speed all — 只跑測速來源, 不含 ip / ping。"""
+    sources = _resolve_sources(cfg, args)
+    use_json = getattr(args, "json", False)
+    results = []
+    for name in sources:
+        try:
+            res = run_source(name, cfg, args)
+        except Exception as exc:  # noqa: BLE001
+            res = {"source": name, "error": str(exc)}
+        results.append(res)
+    if use_json:
+        print(json.dumps(results, ensure_ascii=False, indent=2))
     else:
-        sources = cfg.get("sources", DEFAULT_CONFIG["sources"])
+        print_speed_table(results)
+        section(t("測速完成", "Speed test complete"))
+        print(f"  {t('時間', 'Time')}: {now_iso()}")
+    if not getattr(args, "no_save", False) and any(not r.get("error") for r in results):
+        append_history(_speed_record(results), cfg)
+    return results
 
+
+def cmd_all(cfg: dict, args) -> dict:
+    sources = _resolve_sources(cfg, args)
+    use_json = getattr(args, "json", False)
     collected = {"ip": None, "ping": [], "speed": []}
 
-    if not args.no_ip:
-        ipinfo = lookup_ip_isp()
+    if not getattr(args, "no_ip", False):
+        ipinfo = lookup_ip_isp(get_dotted(cfg, "ip.provider"))
         collected["ip"] = ipinfo
-        if not args.no_save:
-            rec = {"kind": "ip"}
-            rec.update(ipinfo)
-            append_history(rec, cfg)
-        if not args.json:
+        if not use_json:
             print_ip_section(ipinfo)
-    if not args.no_ping:
-        collected["ping"] = _do_ping(cfg, args, resolve_ping_targets(cfg, []))
+    if not getattr(args, "no_ping", False):
+        collected["ping"] = _do_ping(cfg, args, resolve_ping_targets(cfg, []), save=False)
 
     for name in sources:
         try:
@@ -1508,18 +1625,203 @@ def cmd_all(cfg: dict, args) -> dict:
         except Exception as exc:  # noqa: BLE001
             res = {"source": name, "error": str(exc)}
         collected["speed"].append(res)
-        if not args.no_save and not res.get("error"):
-            rec = {"kind": "speed"}
-            rec.update({k: res.get(k) for k in ("source", "download", "upload", "latency", "server")})
-            append_history(rec, cfg)
 
-    if args.json:
+    if use_json:
         print(json.dumps(collected, ensure_ascii=False, indent=2))
     else:
         print_speed_table(collected["speed"])
-        section("統整完成")
-        print(f"  時間: {now_iso()}")
+        section(t("統整完成", "Summary complete"))
+        print(f"  {t('時間', 'Time')}: {now_iso()}")
+
+    if not getattr(args, "no_save", False):
+        rec = {"kind": "all"}
+        if collected["ip"] is not None:
+            rec["ip"] = {k: collected["ip"].get(k) for k in
+                         ("ip", "isp", "asn", "org", "city", "country", "source", "provider")}
+        if collected["ping"]:
+            rec["ping"] = {
+                "params": _ping_effective(cfg, args),
+                "targets": [{k: r.get(k) for k in
+                             ("target", "ip", "sent", "recv", "loss", "min", "avg",
+                              "max", "mdev", "jitter", "method", "error")}
+                            for r in collected["ping"]],
+            }
+        rec["speed"] = [_speed_result_record(r) for r in collected["speed"]]
+        append_history(rec, cfg)
     return collected
+
+
+SPEED_TOOLS = [
+    {"label": "M-Lab", "names": ["ndt7-client"], "bin": "ndt7-client",
+     "kind": "github", "repo": "m-lab/ndt7-client-go",
+     "url": "https://github.com/m-lab/ndt7-client-go/releases"},
+    {"label": "fast.com", "names": ["fast"], "bin": "fast",
+     "kind": "npm", "pkg": "fast-cli", "url": "npm install -g fast-cli"},
+    {"label": "Ookla", "names": ["speedtest", "ookla"], "bin": "speedtest",
+     "kind": "manual", "url": "https://www.speedtest.net/apps/cli"},
+    {"label": "LibreSpeed", "names": ["librespeed-cli"], "bin": "librespeed-cli",
+     "kind": "github", "repo": "librespeed/speedtest-cli",
+     "url": "https://github.com/librespeed/speedtest-cli/releases"},
+]
+
+
+def _machine_arch() -> str:
+    try:
+        import platform
+        m = platform.machine().lower()
+    except Exception:
+        m = ""
+    if m in ("arm64", "aarch64"):
+        return "arm64"
+    if m in ("i386", "i686", "x86"):
+        return "386"
+    return "amd64"
+
+
+def _platform_keywords() -> tuple:
+    if os.name == "nt":
+        return ("windows", _machine_arch())
+    if sys.platform == "darwin":
+        return ("darwin", _machine_arch())
+    return ("linux", _machine_arch())
+
+
+def _download_file(url: str, timeout: float = 60.0) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": f"netspeed/{VERSION}"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def _github_asset(repo: str, keywords: tuple) -> dict | None:
+    rel = _github_latest(repo)
+    assets = rel.get("assets") or []
+    for a in assets:
+        n = (a.get("name") or "").lower()
+        if all(k in n for k in keywords):
+            return a
+    for a in assets:
+        n = (a.get("name") or "").lower()
+        if keywords[0] in n:
+            return a
+    return None
+
+
+def _extract_archive(data: bytes, dest_dir: str, bin_name: str) -> str | None:
+    import io
+    import tarfile
+    import zipfile
+    low = bin_name.lower()
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(data))
+        for m in zf.namelist():
+            base = os.path.basename(m)
+            if base.lower().startswith(low):
+                target = os.path.join(dest_dir, base)
+                with zf.open(m) as src, open(target, "wb") as out:
+                    shutil.copyfileobj(src, out)
+                if os.name != "nt":
+                    os.chmod(target, 0o755)
+                return target
+    except Exception:
+        pass
+    try:
+        tf = tarfile.open(fileobj=io.BytesIO(data))
+        for m in tf.getmembers():
+            base = os.path.basename(m.name)
+            if m.isfile() and base.lower().startswith(low):
+                fh = tf.extractfile(m)
+                if fh is None:
+                    continue
+                target = os.path.join(dest_dir, base)
+                with open(target, "wb") as out:
+                    shutil.copyfileobj(fh, out)
+                if os.name != "nt":
+                    os.chmod(target, 0o755)
+                return target
+    except Exception:
+        pass
+    target = os.path.join(dest_dir, bin_name + (".exe" if os.name == "nt" else ""))
+    with open(target, "wb") as out:
+        out.write(data)
+    if os.name != "nt":
+        os.chmod(target, 0o755)
+    return target
+
+
+def _try_download_tool(tool: dict) -> tuple:
+    dest = install_dir()
+    ensure_dir(dest)
+    kind = tool.get("kind")
+    if kind == "npm":
+        npm = shutil.which("npm")
+        if not npm:
+            return False, t("找不到 npm (需先安裝 Node.js)", "npm not found (install Node.js first)")
+        proc = run_cmd([npm, "install", "-g", tool["pkg"]], timeout=300)
+        if proc.returncode == 0:
+            return True, tool["pkg"]
+        return False, ((proc.stderr or proc.stdout or "").strip()[:200] or "npm failed")
+    if kind == "github":
+        try:
+            asset = _github_asset(tool["repo"], _platform_keywords())
+        except Exception as exc:
+            return False, str(exc)
+        if not asset:
+            return False, t("找不到對應本平台的檔案", "no matching asset for this platform")
+        try:
+            data = _download_file(asset.get("browser_download_url") or "")
+            path = _extract_archive(data, dest, tool["bin"])
+        except Exception as exc:
+            return False, str(exc)
+        return (bool(path), path or "")
+    return False, tool.get("url", "")
+
+
+def cmd_speed_check(cfg: dict, args) -> None:
+    use_json = getattr(args, "json", False)
+    entries = [(tool, find_tool(tool["names"])) for tool in SPEED_TOOLS]
+    missing = [tool for tool, found in entries if not found]
+    if use_json:
+        print(json.dumps([{"tool": tool["label"], "found": bool(f), "path": f, "url": tool["url"]}
+                          for tool, f in entries], ensure_ascii=False, indent=2))
+        return
+
+    section(t("測速工具檢查", "Speed tool check"))
+    for tool, found in entries:
+        mark = tcol("[v]", "ok") if found else tcol("[x]", "error")
+        print(f"  {mark} {tool['label']:<14} {found or t('找不到', 'not found')}")
+    print()
+    if not missing:
+        ok(t("所有測速工具都已就緒。", "All speed tools are available."))
+        return
+    print(t(f"缺少 {len(missing)} 個測速工具。", f"{len(missing)} speed tool(s) missing."))
+
+    assume = getattr(args, "yes", False)
+    if not sys.stdin.isatty() and not assume:
+        for tool in missing:
+            print(f"    {tool['label']}: {tool['url']}")
+        return
+    if assume:
+        ans = "y"
+    else:
+        try:
+            ans = input(col(t("是否協助自動下載缺少的工具? [y=下載 / 任一鍵=返回]: ",
+                              "Download missing tools now? [y=download / any key=back]: "),
+                            "bold")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+    if ans != "y":
+        info(t("已返回。", "Returned."))
+        return
+    for tool in missing:
+        print("  " + t(f"嘗試下載 {tool['label']} ...", f"Downloading {tool['label']} ..."))
+        good, detail = _try_download_tool(tool)
+        if good:
+            ok(t(f"{tool['label']} 已下載: {detail}", f"{tool['label']} downloaded: {detail}"))
+        else:
+            warn(t(f"{tool['label']} 下載失敗 ({detail}); 請手動安裝: {tool['url']}",
+                   f"{tool['label']} download failed ({detail}); install manually: {tool['url']}"))
+    cache_clear()
 
 
 def cmd_pair_serve(cfg: dict, args) -> None:
@@ -1530,22 +1832,23 @@ def cmd_pair_serve(cfg: dict, args) -> None:
     if method == "auto":
         method = "iperf3" if iperf_path else "builtin"
     if method == "iperf3" and not iperf_path:
-        warn("找不到 iperf3, 改用內建對測伺服器")
+        warn(t("找不到 iperf3, 改用內建對測伺服器", "iperf3 not found, using builtin pair server"))
         method = "builtin"
 
     if method == "iperf3":
-        print(col(f"[iperf3 對測伺服器] {host}:{port}  (Ctrl+C 結束)", "green"))
+        print(col(t(f"[iperf3 對測伺服器] {host}:{port}  (Ctrl+C 結束)",
+                    f"[iperf3 pair server] {host}:{port}  (Ctrl+C to stop)"), "green"))
         proc = subprocess.Popen([iperf_path, "-s", "-p", str(port)])
         try:
             proc.wait()
         except KeyboardInterrupt:
-            print("\n正在停止 iperf3 ...")
+            print(t("\n正在停止 iperf3 ...", "\nStopping iperf3 ..."))
             proc.terminate()
             try:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 proc.kill()
-            print("伺服器結束。")
+            print(t("伺服器結束。", "Server stopped."))
     else:
         builtin_serve(host, port)
 
@@ -1565,52 +1868,158 @@ def cmd_pair_client(cfg: dict, args) -> dict:
     return res
 
 
+def _rec_ping_targets(rec: dict) -> list:
+    if rec.get("targets"):
+        return rec["targets"]
+    if rec.get("target") is not None:
+        return [rec]
+    return []
+
+
+def _rec_speed_results(rec: dict) -> list:
+    if rec.get("results"):
+        return rec["results"]
+    if rec.get("source") is not None:
+        return [rec]
+    return []
+
+
+def _avg(vals: list):
+    nums = [v for v in vals if isinstance(v, (int, float))]
+    return (sum(nums) / len(nums)) if nums else None
+
+
 def _record_desc(rec: dict) -> str:
     kind = rec.get("kind")
     if kind == "speed":
-        dl = rec.get("download")
-        ul = rec.get("upload")
-        dl_s = f"{dl:.1f}" if isinstance(dl, (int, float)) else "n/a"
-        ul_s = f"{ul:.1f}" if isinstance(ul, (int, float)) else "n/a"
-        return f"測速 {SOURCE_LABELS.get(rec.get('source'), rec.get('source'))}  下載 {dl_s} / 上傳 {ul_s} Mbps"
+        results = _rec_speed_results(rec)
+        dl = _avg([r.get("download") for r in results])
+        ul = _avg([r.get("upload") for r in results])
+        dl_s = f"{dl:.1f}" if dl is not None else "n/a"
+        ul_s = f"{ul:.1f}" if ul is not None else "n/a"
+        names = ", ".join(str(SOURCE_LABELS.get(r.get("source"), r.get("source")))
+                          for r in results)
+        return t(f"測速 {len(results)} 來源  平均 下載 {dl_s} / 上傳 {ul_s} Mbps  ({names})",
+                 f"Speed {len(results)} sources  avg down {dl_s} / up {ul_s} Mbps  ({names})")
     if kind == "ping":
-        avg = rec.get("avg")
-        avg_s = f"{avg:.2f}ms" if isinstance(avg, (int, float)) else "n/a"
-        loss = rec.get("loss")
-        loss_s = f"{loss:.0f}%" if isinstance(loss, (int, float)) else "n/a"
-        return f"Ping {rec.get('target')}  平均 {avg_s}  遺失 {loss_s}"
+        targets = _rec_ping_targets(rec)
+        avg = _avg([r.get("avg") for r in targets])
+        avg_s = f"{avg:.2f}ms" if avg is not None else "n/a"
+        return t(f"Ping {len(targets)} 目標  平均 {avg_s}",
+                 f"Ping {len(targets)} targets  avg {avg_s}")
+    if kind == "all":
+        n_ping = len((rec.get("ping") or {}).get("targets") or [])
+        n_speed = len(rec.get("speed") or [])
+        has_ip = bool(rec.get("ip"))
+        return t(f"統整  IP:{'有' if has_ip else '無'} + Ping:{n_ping} + 測速:{n_speed}",
+                 f"Summary  IP:{'yes' if has_ip else 'no'} + Ping:{n_ping} + Speed:{n_speed}")
     if kind == "pair":
         dl = rec.get("download")
         ul = rec.get("upload")
         dl_s = f"{dl:.1f}" if isinstance(dl, (int, float)) else "n/a"
         ul_s = f"{ul:.1f}" if isinstance(ul, (int, float)) else "n/a"
-        return (f"對測 {rec.get('peer_ip')}:{rec.get('peer_port')} ({rec.get('method')}) "
-                f"下載 {dl_s} / 上傳 {ul_s} Mbps")
+        return t(f"對測 {rec.get('peer_ip')}:{rec.get('peer_port')} ({rec.get('method')}) "
+                 f"下載 {dl_s} / 上傳 {ul_s} Mbps",
+                 f"Pair {rec.get('peer_ip')}:{rec.get('peer_port')} ({rec.get('method')}) "
+                 f"down {dl_s} / up {ul_s} Mbps")
     if kind == "ip":
-        return f"外網 IP {rec.get('ip')} ({rec.get('isp') or rec.get('org') or '?'})"
+        return t(f"外網 IP {rec.get('ip')} ({rec.get('isp') or rec.get('org') or '?'})",
+                 f"Public IP {rec.get('ip')} ({rec.get('isp') or rec.get('org') or '?'})")
     return kind or "?"
+
+
+def _short_time(ts) -> str:
+    ts = str(ts or "?")
+    if len(ts) >= 16 and ts[4] == "-" and ts[7] == "-":
+        return ts[5:16]
+    return ts
+
+
+def _print_record_detail(rec: dict) -> None:
+    kind = rec.get("kind")
+    if kind == "speed":
+        print_speed_table(_rec_speed_results(rec))
+    elif kind == "ping":
+        targets = _rec_ping_targets(rec)
+        params = rec.get("params") or {}
+        if params:
+            print(tcol("  " + t("參數", "Params") + ": " + " ".join(f"{k}={v}" for k, v in params.items()),
+                       "dim"))
+        print()
+        print_ping_table(targets)
+    elif kind == "all":
+        if rec.get("ip"):
+            print_ip_section(rec["ip"])
+        ping = rec.get("ping") or {}
+        if ping.get("targets"):
+            params = ping.get("params") or {}
+            if params:
+                print(tcol("  " + t("Ping 參數", "Ping params") + ": "
+                           + " ".join(f"{k}={v}" for k, v in params.items()), "dim"))
+            print()
+            print_ping_table(ping["targets"])
+        if rec.get("speed"):
+            print_speed_table(rec["speed"])
+    elif kind == "pair":
+        print_pair_result(rec)
+    elif kind == "ip":
+        print_ip_section(rec)
+    else:
+        print(json.dumps(rec, ensure_ascii=False, indent=2))
 
 
 def rerun_record(rec: dict, cfg: dict, args) -> None:
     kind = rec.get("kind")
     if kind == "speed":
-        cmd_source(rec.get("source"), cfg, args)
+        for r in _rec_speed_results(rec):
+            cmd_source(r.get("source"), cfg, args)
     elif kind == "ping":
-        targets = [rec.get("target")]
+        targets = [r.get("target") for r in _rec_ping_targets(rec) if r.get("target")]
+        if not targets:
+            warn(t("此紀錄沒有可重跑的目標", "No target to rerun in this record"))
+            return
         sub = argparse.Namespace(targets=targets, count=None, interval=None, timeout=None,
                                  size=None, method=None, no_gateway=True, only=True,
-                                 json=args.json, no_save=args.no_save, no_color=args.no_color)
+                                 json=getattr(args, "json", False),
+                                 no_save=getattr(args, "no_save", False),
+                                 no_color=getattr(args, "no_color", False))
         cmd_ping(cfg, sub)
+    elif kind == "all":
+        sources = [r.get("source") for r in (rec.get("speed") or []) if r.get("source")]
+        sub = argparse.Namespace(sources=(",".join(sources) if sources else None),
+                                 no_ping=not bool((rec.get("ping") or {}).get("targets")),
+                                 no_ip=not bool(rec.get("ip")),
+                                 seconds=None, json=getattr(args, "json", False),
+                                 no_save=getattr(args, "no_save", False),
+                                 no_color=getattr(args, "no_color", False),
+                                 config=None)
+        cmd_all(cfg, sub)
     elif kind == "pair":
         sub = argparse.Namespace(host=rec.get("peer_ip"), port=rec.get("peer_port"),
                                  method=rec.get("method") or "auto", mode=rec.get("mode") or "both",
                                  duration=None, streams=None, iperf_path=None,
-                                 json=args.json, no_save=args.no_save, no_color=args.no_color)
+                                 json=getattr(args, "json", False),
+                                 no_save=getattr(args, "no_save", False),
+                                 no_color=getattr(args, "no_color", False))
         cmd_pair_client(cfg, sub)
     elif kind == "ip":
         cmd_ip(cfg, args)
     else:
-        warn(f"不支援重跑類型: {kind}")
+        warn(t(f"不支援重跑類型: {kind}", f"Unsupported record type: {kind}"))
+
+
+def _record_detail_menu(rec: dict, cfg: dict, args) -> None:
+    _print_record_detail(rec)
+    if not sys.stdin.isatty():
+        return
+    try:
+        ans = input(col(t("\n[r] 重跑此項 / [Enter] 返回: ", "\n[r] rerun / [Enter] back: "),
+                        "bold")).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if ans == "r":
+        rerun_record(rec, cfg, args)
 
 
 def cmd_history(cfg: dict, args, interactive: bool = True) -> None:
@@ -1621,32 +2030,36 @@ def cmd_history(cfg: dict, args, interactive: bool = True) -> None:
     if kind:
         records = [r for r in records if r.get("kind") == kind]
     if not records:
-        info("目前沒有歷史紀錄。")
+        info(t("目前沒有歷史紀錄。", "No history yet."))
         return
     shown = records[-limit:][::-1]
-    section("歷史紀錄")
+    section(t("歷史紀錄", "History"))
+    print(tcol(t("  格式: [編號] 時間  類型摘要 — 輸入編號可查看內容並重跑",
+                 "  Format: [no] time  type-summary — enter a number to view details and rerun"),
+               "dim"))
     for i, rec in enumerate(shown, 1):
-        print(f"  [{i:>3}] {rec.get('time','?'):<20} {_record_desc(rec)}")
+        print(f"  [{i:>3}] {_short_time(rec.get('time')):<12} {_record_desc(rec)}")
 
     if run:
         idx = run
         if 1 <= idx <= len(shown):
-            rerun_record(shown[idx - 1], cfg, args)
+            _record_detail_menu(shown[idx - 1], cfg, args)
         else:
-            error("編號超出範圍")
+            error(t("編號超出範圍", "Index out of range"))
         return
 
     if interactive and sys.stdin.isatty():
         try:
-            choice = input(col("\n輸入編號以重跑該項 (Enter 取消): ", "bold")).strip()
+            choice = input(col(t("\n輸入編號查看/重跑 (Enter 取消): ",
+                                 "\nEnter number to view/rerun (Enter to cancel): "), "bold")).strip()
         except (EOFError, KeyboardInterrupt):
             choice = ""
         if choice.isdigit():
             idx = int(choice)
             if 1 <= idx <= len(shown):
-                rerun_record(shown[idx - 1], cfg, args)
+                _record_detail_menu(shown[idx - 1], cfg, args)
             else:
-                error("編號超出範圍")
+                error(t("編號超出範圍", "Index out of range"))
 
 
 def cmd_config(cfg: dict, args) -> None:
@@ -1665,34 +2078,34 @@ def cmd_config(cfg: dict, args) -> None:
         cfg.update(reset)
         save_config(cfg, getattr(args, "config", None))
         apply_theme(cfg)
-        ok("設定已重設為預設值")
+        ok(t("設定已重設為預設值", "Config reset to defaults"))
     elif action == "export":
         path = values[0] if values else os.path.join(os.getcwd(), "netspeed-config.json")
         try:
             save_config(cfg, path)
         except OSError as exc:
-            error(f"匯出失敗: {exc}")
+            error(t(f"匯出失敗: {exc}", f"Export failed: {exc}"))
             return
-        ok(f"已匯出設定: {path}")
+        ok(t(f"已匯出設定: {path}", f"Config exported: {path}"))
     elif action == "import":
         if not values:
-            error("用法: config import <檔案>")
+            error(t("用法: config import <檔案>", "Usage: config import <file>"))
             return
         path = values[0]
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
         except Exception as exc:
-            error(f"讀取失敗: {exc}")
+            error(t(f"讀取失敗: {exc}", f"Read failed: {exc}"))
             return
         merged = deep_merge(DEFAULT_CONFIG, data)
         cfg.clear()
         cfg.update(merged)
         save_config(cfg, getattr(args, "config", None))
         apply_theme(cfg)
-        ok(f"已匯入設定: {path}")
+        ok(t(f"已匯入設定: {path}", f"Config imported: {path}"))
     else:
-        print(tcol(f"設定檔: {config_path()}", "dim"))
+        print(tcol(t(f"設定檔: {config_path()}", f"Config file: {config_path()}"), "dim"))
         print(json.dumps(cfg, ensure_ascii=False, indent=2))
 
 
@@ -1702,11 +2115,13 @@ def cmd_theme(cfg: dict, args) -> None:
     theme = cfg.setdefault("theme", dict(DEFAULT_THEME))
     if action == "set":
         if len(values) < 2:
-            error("用法: theme set <項目> <顏色>   顏色例: red / green,bold / default")
+            error(t("用法: theme set <項目> <顏色>   顏色例: red / green,bold / default",
+                    "Usage: theme set <key> <color>   e.g. red / green,bold / default"))
             return
         key, val = values[0], values[1]
         if key not in DEFAULT_THEME:
-            warn(f"未知項目 {key} (可用: {', '.join(DEFAULT_THEME)})")
+            warn(t(f"未知項目 {key} (可用: {', '.join(DEFAULT_THEME)})",
+                   f"Unknown key {key} (available: {', '.join(DEFAULT_THEME)})"))
         theme[key] = val
         save_config(cfg, getattr(args, "config", None))
         apply_theme(cfg)
@@ -1715,97 +2130,102 @@ def cmd_theme(cfg: dict, args) -> None:
         cfg["theme"] = dict(DEFAULT_THEME)
         save_config(cfg, getattr(args, "config", None))
         apply_theme(cfg)
-        ok("主題已重設為預設")
+        ok(t("主題已重設為預設", "Theme reset to default"))
     elif action == "preset":
         name = values[0] if values else ""
         if name not in THEME_PRESETS:
-            error(f"未知 preset: {name} (可用: {', '.join(THEME_PRESETS)})")
+            error(t(f"未知 preset: {name} (可用: {', '.join(THEME_PRESETS)})",
+                    f"Unknown preset: {name} (available: {', '.join(THEME_PRESETS)})"))
             return
         cfg["theme"] = dict(THEME_PRESETS[name])
         save_config(cfg, getattr(args, "config", None))
         apply_theme(cfg)
-        ok(f"已套用主題 preset: {name}")
+        ok(t(f"已套用主題 preset: {name}", f"Theme preset applied: {name}"))
     elif action == "export":
         path = values[0] if values else os.path.join(os.getcwd(), "netspeed-theme.json")
         try:
             with open(path, "w", encoding="utf-8") as fh:
                 json.dump(cfg.get("theme", {}), fh, ensure_ascii=False, indent=2)
         except OSError as exc:
-            error(f"匯出失敗: {exc}")
+            error(t(f"匯出失敗: {exc}", f"Export failed: {exc}"))
             return
-        ok(f"已匯出主題: {path}")
+        ok(t(f"已匯出主題: {path}", f"Theme exported: {path}"))
     elif action == "import":
         if not values:
-            error("用法: theme import <檔案>")
+            error(t("用法: theme import <檔案>", "Usage: theme import <file>"))
             return
         path = values[0]
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
         except Exception as exc:
-            error(f"讀取失敗: {exc}")
+            error(t(f"讀取失敗: {exc}", f"Read failed: {exc}"))
             return
         cfg["theme"] = deep_merge(DEFAULT_THEME, data)
         save_config(cfg, getattr(args, "config", None))
         apply_theme(cfg)
-        ok(f"已匯入主題: {path}")
+        ok(t(f"已匯入主題: {path}", f"Theme imported: {path}"))
     else:
-        section("主題 (theme)")
+        section(t("主題 (theme)", "Theme"))
         for key in DEFAULT_THEME:
             val = theme.get(key, DEFAULT_THEME[key])
-            sample = "範例 Sample" if not val or val == "default" else col("範例 Sample", *str(val).split(","))
+            sample = t("範例 Sample", "Sample") if not val or val == "default" \
+                else col(t("範例 Sample", "Sample"), *str(val).split(","))
             print(f"  {key:<10} {val:<16} {sample}")
         print()
-        print(tcol("可設定項目: " + ", ".join(DEFAULT_THEME), "dim"))
+        print(tcol(t("可設定項目: ", "Keys: ") + ", ".join(DEFAULT_THEME), "dim"))
         print(tcol("presets: " + ", ".join(THEME_PRESETS), "dim"))
-        print(tcol("用法: theme set <項目> <顏色> / theme preset <名稱> / theme export|import <檔案>", "dim"))
+        print(tcol(t("用法: theme set <項目> <顏色> / theme preset <名稱> / theme export|import <檔案>",
+                     "Usage: theme set <key> <color> / theme preset <name> / theme export|import <file>"),
+                   "dim"))
 
 
 def cmd_targets(cfg: dict, args) -> None:
     action = args.action
     targets = cfg.setdefault("ping", {}).setdefault("targets", [])
     if action == "add":
-        for t in args.values:
-            if t not in targets:
-                targets.append(t)
+        for tg in args.values:
+            if tg not in targets:
+                targets.append(tg)
         save_config(cfg)
-        ok(f"已新增: {', '.join(args.values)}")
+        ok(t(f"已新增: {', '.join(args.values)}", f"Added: {', '.join(args.values)}"))
     elif action == "del":
-        for t in args.values:
-            if t in targets:
-                targets.remove(t)
+        for tg in args.values:
+            if tg in targets:
+                targets.remove(tg)
         save_config(cfg)
-        ok(f"已刪除: {', '.join(args.values)}")
+        ok(t(f"已刪除: {', '.join(args.values)}", f"Removed: {', '.join(args.values)}"))
     elif action == "set":
         cfg["ping"]["targets"] = list(args.values)
         save_config(cfg)
-        ok("已設定 ping 目標清單")
+        ok(t("已設定 ping 目標清單", "Ping target list updated"))
     elif action == "gateway":
         gw = get_default_gateway()
-        print(f"Default gateway: {gw or 'n/a'}")
+        print(t("Default gateway: ", "Default gateway: ") + (gw or "n/a"))
         return
     else:
-        print(col("Ping 目標清單:", "bold"))
-        for i, t in enumerate(targets, 1):
-            print(f"  {i:>2}. {t}")
-        print(col(f"  自動偵測 default gateway: {cfg['ping'].get('auto_gateway')}", "dim"))
+        print(col(t("Ping 目標清單:", "Ping target list:"), "bold"))
+        for i, tg in enumerate(targets, 1):
+            print(f"  {i:>2}. {tg}")
+        print(col(t(f"  自動偵測 default gateway: {cfg['ping'].get('auto_gateway')}",
+                    f"  Auto default gateway: {cfg['ping'].get('auto_gateway')}"), "dim"))
 
 
 def cmd_endpoints(cfg: dict, args) -> None:
     if args.action == "set":
         if len(args.values) < 2:
-            error("用法: endpoints set <來源> <值>")
+            error(t("用法: endpoints set <來源> <值>", "Usage: endpoints set <source> <value>"))
             return
         source, value = args.values[0], " ".join(args.values[1:])
         set_dotted(cfg, f"endpoints.{source}", value)
         save_config(cfg)
-        ok(f"已設定 endpoints.{source} = {value}")
+        ok(t(f"已設定 endpoints.{source} = {value}", f"Set endpoints.{source} = {value}"))
         return
-    print(col("測速端點設定 (endpoints):", "bold"))
+    print(col(t("測速端點設定 (endpoints):", "Speed endpoints:"), "bold"))
     for key, val in cfg.get("endpoints", {}).items():
-        print(f"  {key:<12}: {val or '(自動)'}")
+        print(f"  {key:<12}: {val or t('(自動)', '(auto)')}")
     print()
-    print(col("啟用來源 (sources):", "bold"))
+    print(col(t("啟用來源 (sources):", "Sources:"), "bold"))
     print("  " + ", ".join(cfg.get("sources", [])))
 
 
@@ -2121,30 +2541,35 @@ def _real_ifaces(data: dict) -> list:
 
 def _dhcp_text(val) -> str:
     if val is True:
-        return "DHCP (自動取得)"
+        return t("DHCP (自動取得)", "DHCP (automatic)")
     if val is False:
-        return "靜態 (手動設定)"
-    return "未知"
+        return t("靜態 (手動設定)", "Static (manual)")
+    return t("未知", "unknown")
 
 
 def _print_iface(iface: dict) -> None:
-    print(col(f"介面: {iface['name']}", "bold")
-          + (f"   狀態: {iface.get('status')}" if iface.get("status") else "")
+    print(col(t(f"介面: {iface['name']}", f"Interface: {iface['name']}"), "bold")
+          + (t(f"   狀態: {iface.get('status')}", f"   status: {iface.get('status')}")
+             if iface.get("status") else "")
           + (f"   MAC: {iface['mac']}" if iface.get("mac") else ""))
-    print(f"  設定方式 : {_dhcp_text(iface.get('dhcp'))}")
+    print(t(f"  設定方式 : {_dhcp_text(iface.get('dhcp'))}",
+            f"  Config   : {_dhcp_text(iface.get('dhcp'))}"))
     for item in iface.get("ipv4", []):
-        tag = "次要 Sub IP" if item.get("secondary") else "主要"
+        tag = t("次要 Sub IP", "secondary") if item.get("secondary") else t("主要", "primary")
         mask = item.get("netmask") or "?"
-        print(f"  IP       : {item.get('cidr'):<20} 遮罩 {mask:<16} [{tag}]")
-    print(f"  Default Gateway : {iface.get('gateway') or 'n/a'}")
+        print(t(f"  IP       : {item.get('cidr'):<20} 遮罩 {mask:<16} [{tag}]",
+                f"  IP       : {item.get('cidr'):<20} mask {mask:<16} [{tag}]"))
+    print(t(f"  Default Gateway : {iface.get('gateway') or 'n/a'}",
+            f"  Default Gateway : {iface.get('gateway') or 'n/a'}"))
 
 
 def _print_routes(routes: list) -> None:
     if not routes:
         return
     print()
-    print(col("Static Route (靜態路由):", "bold"))
-    print(f"  {'目標':<22} {'閘道':<18} {'介面':<12} {'計量':>6}  協定")
+    print(col(t("Static Route (靜態路由):", "Static routes:"), "bold"))
+    print(f"  {t('目標', 'Dest'):<22} {t('閘道', 'Gateway'):<18} {t('介面', 'Iface'):<12} "
+          f"{t('計量', 'Metric'):>6}  {t('協定', 'Proto')}")
     for r in routes:
         print(f"  {str(r.get('dest')):<22} {str(r.get('gateway')):<18} "
               f"{str(r.get('iface') or ''):<12} {str(r.get('metric') or ''):>6}  {r.get('proto') or ''}")
@@ -2161,26 +2586,26 @@ def _default_iface(data: dict):
 def _netinfo_menu(real: list, all_ifaces: list):
     if not real:
         return all_ifaces
-    print("  選擇要顯示的介面:")
+    print("  " + t("選擇要顯示的介面:", "Select interface to show:"))
     for i, ifc in enumerate(real, 1):
         ips = ", ".join(x.get("cidr", "?") for x in ifc.get("ipv4", []))
         gw = ifc.get("gateway")
         tag = tcol("  (default route)", "dim") if gw else ""
         print(f"    [{i}] {ifc['name']:<24} {ips}{tag}")
-    print(tcol("    [a] 全部    [Enter/q] 離開", "dim"))
+    print(tcol("    " + t("[a] 全部    [Enter/q] 離開", "[a] all    [Enter/q] leave"), "dim"))
     try:
-        choice = input(col("  請輸入: ", "bold")).strip().lower()
+        choice = input(col(t("  請輸入: ", "  Enter: "), "bold")).strip().lower()
     except (EOFError, KeyboardInterrupt):
         print()
         return None
     if choice in ("", "q", "quit", "exit"):
-        info("已取消。")
+        info(t("已取消。", "Cancelled."))
         return None
     if choice == "a":
         return real
     if choice.isdigit() and 1 <= int(choice) <= len(real):
         return [real[int(choice) - 1]]
-    warn("無效的選擇")
+    warn(t("無效的選擇", "Invalid choice"))
     return None
 
 
@@ -2196,7 +2621,7 @@ def cmd_netinfo(cfg: dict, args) -> None:
     if getattr(args, "interface", None):
         selected = [i for i in all_ifaces if i["name"] == args.interface]
         if not selected:
-            error(f"找不到介面: {args.interface}")
+            error(t(f"找不到介面: {args.interface}", f"Interface not found: {args.interface}"))
             return
     elif getattr(args, "all", False):
         selected = real or all_ifaces
@@ -2209,17 +2634,19 @@ def cmd_netinfo(cfg: dict, args) -> None:
         selected = [default] if default else (real or all_ifaces)
 
     if not selected:
-        error("找不到作用中的網路介面")
+        error(t("找不到作用中的網路介面", "No active network interface found"))
         return
 
-    section("系統網路資訊")
+    section(t("系統網路資訊", "Network information"))
     for ifc in selected:
         _print_iface(ifc)
         print()
 
     if (not getattr(args, "all", False) and not getattr(args, "interface", None)
             and not getattr(args, "select", False) and len(real) > 1):
-        print(tcol(f"  (偵測到 {len(real)} 個介面; netinfo -i 可選擇, netinfo --all 顯示全部)", "dim"))
+        print(tcol(t(f"  (偵測到 {len(real)} 個介面; netinfo -i 可選擇, netinfo --all 顯示全部)",
+                     f"  ({len(real)} interfaces found; netinfo -i to select, netinfo --all to show all)"),
+                   "dim"))
 
     routes = data.get("routes", [])
     if getattr(args, "interface", None):
@@ -2254,74 +2681,117 @@ def _check_ping() -> tuple:
     return False, "無法 ping"
 
 
-def cmd_check(cfg: dict, args) -> None:
-    if not getattr(args, "refresh", False) and "check" in _SESSION_CACHE:
-        checks = _SESSION_CACHE["check"]
-        _print_check(cfg, args, checks)
-        return
-    checks = _collect_checks(cfg)
-    _SESSION_CACHE["check"] = checks
-    _print_check(cfg, args, checks)
-
-
-def _collect_checks(cfg: dict) -> list:
+def _collect_tools(cfg: dict) -> list:
     checks = []
+    okping, ping_detail = _check_ping()
+    checks.append({"ok": okping, "label": "Ping", "detail": ping_detail,
+                   "category": "ping", "in_all": True})
+    for tool in SPEED_TOOLS:
+        found = find_tool(tool["names"])
+        checks.append({
+            "ok": bool(found), "label": tool["label"],
+            "detail": found or (t("找不到 — 下載: ", "not found — download: ") + tool["url"]),
+            "category": "speed", "in_all": True,
+        })
+    iperf = find_iperf(cfg)
+    checks.append({"ok": bool(iperf), "label": "iperf3",
+                   "detail": iperf or t("找不到 — 將使用內建對測", "not found — will use builtin"),
+                   "category": "pair", "in_all": False})
+    return checks
 
-    checks.append((True, "Python", sys.version.split()[0]))
 
+def _collect_env(cfg: dict) -> list:
+    env = []
+    env.append((True, "Python", sys.version.split()[0]))
     try:
         ensure_dir(config_dir())
         with open(os.path.join(config_dir(), ".write_test"), "w") as fh:
             fh.write("x")
         os.remove(os.path.join(config_dir(), ".write_test"))
-        checks.append((True, "設定檔目錄", config_dir()))
+        env.append((True, t("設定檔目錄", "Config dir"), config_dir()))
     except Exception as exc:
-        checks.append((False, "設定檔目錄", f"{config_dir()} ({exc})"))
-
-    checks.append((True, "Cloudflare 測速", "內建 (純 Python, 不需外部工具)"))
-    checks.append((True, "外網 IP / 電信商", "內建 (ipinfo / ifconfig / ip-api 備援)"))
-
-    okping, ping_detail = _check_ping()
-    checks.append((okping, "Ping", ping_detail))
-
-    tool_map = [
-        ("M-Lab", ["ndt7-client"], "ndt7-client.exe",
-         "https://github.com/m-lab/ndt7-client-go/releases"),
-        ("fast.com", ["fast"], "fast.cmd (Node.js)",
-         "npm install -g fast-cli  /  https://github.com/sindresorhus/fast-cli"),
-        ("Ookla", ["speedtest", "ookla"], "speedtest.exe",
-         "https://www.speedtest.net/apps/cli"),
-        ("LibreSpeed", ["librespeed-cli"], "librespeed-cli.exe",
-         "https://github.com/librespeed/speedtest-cli/releases"),
-    ]
-    for label, names, fname, url in tool_map:
-        found = find_tool(names)
-        checks.append((bool(found), label, found or f"找不到 — 下載: {url}"))
-
-    iperf = find_iperf(cfg)
-    checks.append((bool(iperf), "對測 iperf3",
-                   iperf or "找不到 — 將使用內建對測  (下載: https://iperf.fr/iperf-download.php)"))
-
+        env.append((False, t("設定檔目錄", "Config dir"), f"{config_dir()} ({exc})"))
+    env.append((True, t("Cloudflare 測速", "Cloudflare speed"),
+                t("內建 (純 Python, 不需外部工具)", "builtin (pure Python)")))
+    env.append((True, t("外網 IP / 電信商", "Public IP / ISP"),
+                t("內建 (ipinfo / ifconfig / ip-api 備援)",
+                  "builtin (ipinfo / ifconfig / ip-api)")))
     online = _check_internet()
-    checks.append((online, "網際網路連線", "可達" if online else "無法連線 (TCP 1.1.1.1:443)"))
-    return checks
+    env.append((online, t("網際網路連線", "Internet"),
+                t("可達", "reachable") if online
+                else t("無法連線 (TCP 1.1.1.1:443)", "unreachable (TCP 1.1.1.1:443)")))
+    return env
 
 
-def _print_check(cfg: dict, args, checks: list) -> None:
+def cmd_show_tools(cfg: dict, args) -> None:
+    if not getattr(args, "refresh", False) and "check" in _SESSION_CACHE:
+        checks = _SESSION_CACHE["check"]
+    else:
+        checks = _collect_tools(cfg)
+        _SESSION_CACHE["check"] = checks
     if getattr(args, "json", False):
-        print(json.dumps([{"ok": c[0], "item": c[1], "detail": c[2]} for c in checks],
+        print(json.dumps(checks, ensure_ascii=False, indent=2))
+        return
+    section(t("工具狀態檢查", "Tool status"))
+    print(tcol(t("  (* = 執行 all 時會一併執行)", "  (* = also runs under all)"), "dim"))
+    cats = [("ping", t("Ping", "Ping")),
+            ("speed", t("測速", "Speed")),
+            ("pair", t("對測 (pair)", "Pair"))]
+    for key, title in cats:
+        items = [c for c in checks if c.get("category") == key]
+        if not items:
+            continue
+        print()
+        print(tcol(f"  [{title}]", "heading"))
+        for c in items:
+            mark = tcol("[v]", "ok") if c["ok"] else tcol("[x]", "error")
+            star = "*" if c.get("in_all") else " "
+            print(f"   {star}{mark} {c['label']:<16} {c['detail']}")
+    usable = sum(1 for c in checks if c["ok"])
+    print()
+    print(f"  {t('可用項目', 'Available')}: {usable}/{len(checks)}")
+    print(tcol("  " + t("提示: 外部工具可放 PATH, 或直接放在 netspeed 同層目錄: ",
+                        "Tip: put tools on PATH, or next to netspeed: ")
+               + os.path.dirname(os.path.abspath(__file__)), "dim"))
+
+
+def cmd_show_env(cfg: dict, args) -> None:
+    if not getattr(args, "refresh", False) and "env" in _SESSION_CACHE:
+        env = _SESSION_CACHE["env"]
+    else:
+        env = _collect_env(cfg)
+        _SESSION_CACHE["env"] = env
+    if getattr(args, "json", False):
+        print(json.dumps([{"ok": e[0], "item": e[1], "detail": e[2]} for e in env],
                          ensure_ascii=False, indent=2))
         return
-
-    section("工具狀態檢查")
-    for good, item, detail in checks:
+    section(t("環境狀態檢查", "Environment check"))
+    for good, item, detail in env:
         mark = tcol("[v]", "ok") if good else tcol("[x]", "error")
         print(f"  {mark} {item:<16} {detail}")
-    usable = sum(1 for c in checks if c[0])
+    usable = sum(1 for e in env if e[0])
     print()
-    print(f"  可用項目: {usable}/{len(checks)}")
-    print(tcol(f"  提示: 外部工具可放在 PATH, 或直接放在 netspeed 同層目錄: {os.path.dirname(os.path.abspath(__file__))}",
-               "dim"))
+    print(f"  {t('正常項目', 'OK items')}: {usable}/{len(env)}")
+
+
+def cmd_show_ping(cfg: dict, args) -> None:
+    pc = cfg.get("ping", {})
+    section(t("Ping 設定", "Ping settings"))
+    print(f"  {t('參數', 'Params')}: count:{pc.get('count')} interval:{pc.get('interval')} "
+          f"timeout:{pc.get('timeout')} size:{pc.get('size')} method:{pc.get('method')}")
+    auto = t("on", "on") if pc.get("auto_gateway", True) else "off"
+    print(f"  {t('預設閘道自動加入', 'Auto default gateway')}: {auto}   "
+          f"({t('目前閘道', 'current gateway')}: {_ping_gateway_text(cfg)})")
+    targets = pc.get("targets", [])
+    print(f"  {t('目標清單', 'Targets')} ({len(targets)}):")
+    for i, tg in enumerate(targets, 1):
+        print(f"    {i}. {tg}")
+    print(tcol("  " + t("修改: config targets ... / ping 互動選單 / configure 模式",
+                        "Edit: config targets ... / ping menu / configure mode"), "dim"))
+
+
+def cmd_check(cfg: dict, args) -> None:
+    cmd_show_tools(cfg, args)
 
 
 # --------------------------------------------------------------------------- #
@@ -2349,10 +2819,10 @@ def _do_update(repo: str, tag: str, release: dict) -> bool:
     try:
         content = _http_get(url, timeout=20)
     except Exception as exc:
-        error(f"下載更新失敗: {exc}")
+        error(t(f"下載更新失敗: {exc}", f"Download failed: {exc}"))
         return False
     if "def main(" not in content or "netspeed" not in content:
-        error("下載內容不像是 netspeed.py, 已中止")
+        error(t("下載內容不像是 netspeed.py, 已中止", "Downloaded content is not netspeed.py; aborted"))
         return False
     path = os.path.abspath(__file__)
     try:
@@ -2360,7 +2830,7 @@ def _do_update(repo: str, tag: str, release: dict) -> bool:
         with open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(content)
     except OSError as exc:
-        error(f"寫入失敗: {exc}")
+        error(t(f"寫入失敗: {exc}", f"Write failed: {exc}"))
         return False
     inst = os.path.join(install_dir(), "netspeed.py")
     if os.path.exists(inst) and os.path.abspath(inst) != path:
@@ -2375,7 +2845,8 @@ def check_update(cfg: dict, interactive: bool = True, force: bool = False) -> No
     repo = get_dotted(cfg, "update.repo")
     if not repo:
         if force:
-            warn("尚未設定更新來源。請先設定: netspeed set update.repo <你的帳號>/<repo>")
+            warn(t("尚未設定更新來源。請先設定: netspeed set update.repo <你的帳號>/<repo>",
+                   "Update repo not set. Use: netspeed set update.repo <owner>/<repo>"))
         return
     if not force and not get_dotted(cfg, "update.check_on_start"):
         return
@@ -2395,45 +2866,46 @@ def check_update(cfg: dict, interactive: bool = True, force: bool = False) -> No
     latest = tag.lstrip("vV")
     if not latest or _parse_version(latest) <= _parse_version(VERSION):
         if force:
-            ok(f"已是最新版本 ({VERSION})")
+            ok(t(f"已是最新版本 ({VERSION})", f"Already latest ({VERSION})"))
         return
     if latest == get_dotted(cfg, "update.skip_version"):
         if force:
-            info(f"版本 {latest} 已被標記為不更新。")
+            info(t(f"版本 {latest} 已被標記為不更新。", f"Version {latest} marked as skipped."))
         return
 
-    section("發現新版本")
-    print(f"  目前版本 : {VERSION}")
-    print(f"  最新版本 : {col(latest, 'green', 'bold')}")
+    section(t("發現新版本", "New version available"))
+    print(t(f"  目前版本 : {VERSION}", f"  Current : {VERSION}"))
+    print(t(f"  最新版本 : {col(latest, 'green', 'bold')}", f"  Latest  : {col(latest, 'green', 'bold')}"))
     body = (release.get("body") or "").strip()
     if body:
-        print("  更新內容 :")
+        print(t("  更新內容 :", "  Changelog:"))
         for line in body.splitlines()[:20]:
             print("    " + line)
     print()
     if not interactive:
         return
     try:
-        ans = input(col("是否更新? [y=更新 / n=稍後 / s=此版本不再通知]: ", "bold")).strip().lower()
+        ans = input(col(t("是否更新? [y=更新 / n=稍後 / s=此版本不再通知]: ",
+                          "Update now? [y=yes / n=later / s=skip this version]: "), "bold")).strip().lower()
     except (EOFError, KeyboardInterrupt):
         print()
         return
     if ans == "s":
         set_dotted(cfg, "update.skip_version", latest)
         save_config(cfg)
-        ok(f"已設定不再通知版本 {latest}")
+        ok(t(f"已設定不再通知版本 {latest}", f"Will not notify for version {latest}"))
     elif ans in ("y", "yes"):
         if _do_update(repo, tag, release):
-            ok("更新完成, 請重新啟動 netspeed。")
+            ok(t("更新完成, 請重新啟動 netspeed。", "Update complete; please restart netspeed."))
         else:
-            error("更新失敗。")
+            error(t("更新失敗。", "Update failed."))
 
 
 def cmd_update(cfg: dict, args) -> None:
     if getattr(args, "reset_skip", False):
         set_dotted(cfg, "update.skip_version", "")
         save_config(cfg)
-        ok("已清除『不再通知』的版本設定")
+        ok(t("已清除『不再通知』的版本設定", "Cleared 'skip version' setting"))
     check_update(cfg, interactive=sys.stdin.isatty(), force=True)
 
 
@@ -2600,9 +3072,10 @@ def _is_installed() -> bool:
 
 def cmd_install(cfg: dict, args) -> None:
     if _is_installed():
-        print(f"偵測到已安裝於: {install_dir()}")
-        if not _confirm("是否重新安裝 (覆蓋)? [y/N]: ", getattr(args, "yes", False)):
-            info("已取消安裝。")
+        print(t(f"偵測到已安裝於: {install_dir()}", f"Already installed at: {install_dir()}"))
+        if not _confirm(t("是否重新安裝 (覆蓋)? [y/N]: ", "Reinstall (overwrite)? [y/N]: "),
+                        getattr(args, "yes", False)):
+            info(t("已取消安裝。", "Install cancelled."))
             return
     src = os.path.abspath(__file__)
     idir = install_dir()
@@ -2625,34 +3098,39 @@ def cmd_install(cfg: dict, args) -> None:
         os.chmod(launcher, 0o755)
 
     if getattr(args, "no_path", False):
-        path_note = "已略過 (--no-path)"
+        path_note = t("已略過 (--no-path)", "skipped (--no-path)")
     elif os.name == "nt":
         added = _win_add_path(ldir)
-        path_note = "已加入使用者 PATH" if added else "PATH 已包含此目錄"
+        path_note = t("已加入使用者 PATH", "added to user PATH") if added \
+            else t("PATH 已包含此目錄", "PATH already contains it")
     else:
         touched = _unix_add_path(ldir)
-        path_note = ("已更新 " + ", ".join(touched)) if touched else "PATH 設定已存在"
+        path_note = (t("已更新 ", "updated ") + ", ".join(touched)) if touched \
+            else t("PATH 設定已存在", "PATH already set")
 
-    section("安裝完成")
-    print(f"  程式      : {dst}")
-    print(f"  啟動器    : {launcher}")
-    print(f"  PATH      : {path_note}")
-    print(f"  設定/歷史 : {config_dir()}")
+    section(t("安裝完成", "Install complete"))
+    print(t(f"  程式      : {dst}", f"  Program   : {dst}"))
+    print(t(f"  啟動器    : {launcher}", f"  Launcher  : {launcher}"))
+    print(t(f"  PATH      : {path_note}", f"  PATH      : {path_note}"))
+    print(t(f"  設定/歷史 : {config_dir()}", f"  Config    : {config_dir()}"))
     print()
     if os.name == "nt":
-        print("請重開終端機後即可使用: " + col("netspeed all", "bold"))
+        print(t("請重開終端機後即可使用: ", "Reopen terminal to use: ") + col("netspeed all", "bold"))
     else:
-        print(f"重開終端機或執行 source 後即可使用: {col('netspeed all', 'bold')}")
-        print(f"（也可直接: {col(f'{python} {dst} all', 'bold')}）")
+        print(t(f"重開終端機或執行 source 後即可使用: {col('netspeed all', 'bold')}",
+                f"Reopen terminal or source to use: {col('netspeed all', 'bold')}"))
+        print(t(f"（也可直接: {col(f'{python} {dst} all', 'bold')}）",
+                f"(or directly: {col(f'{python} {dst} all', 'bold')})"))
 
 
 def cmd_uninstall(cfg: dict, args) -> None:
     if _is_installed():
-        if not _confirm("確定要移除已安裝的 netspeed? [y/N]: ", getattr(args, "yes", False)):
-            info("已取消移除。")
+        if not _confirm(t("確定要移除已安裝的 netspeed? [y/N]: ", "Uninstall netspeed? [y/N]: "),
+                        getattr(args, "yes", False)):
+            info(t("已取消移除。", "Uninstall cancelled."))
             return
     elif not args.purge:
-        info("找不到已安裝的檔案 (可能尚未安裝)。")
+        info(t("找不到已安裝的檔案 (可能尚未安裝)。", "No installed files found (maybe not installed)."))
         return
 
     removed = []
@@ -2675,129 +3153,164 @@ def cmd_uninstall(cfg: dict, args) -> None:
         else:
             _unix_remove_path(bin_dir())
 
-    section("移除完成")
+    section(t("移除完成", "Uninstall complete"))
     if removed:
         for p in removed:
-            print(f"  已刪除: {p}")
+            print(t(f"  已刪除: {p}", f"  removed: {p}"))
     else:
-        print("  找不到已安裝的檔案 (可能尚未安裝)")
+        print(t("  找不到已安裝的檔案 (可能尚未安裝)", "  no installed files found (maybe not installed)"))
     if args.purge:
         shutil.rmtree(config_dir(), ignore_errors=True)
-        print(f"  已清除設定與歷史: {config_dir()}")
+        print(t(f"  已清除設定與歷史: {config_dir()}", f"  config & history removed: {config_dir()}"))
     else:
-        print(f"  設定與歷史保留於: {config_dir()}  (加 --purge 可一併刪除)")
+        print(t(f"  設定與歷史保留於: {config_dir()}  (加 --purge 可一併刪除)",
+                f"  config & history kept at: {config_dir()}  (use --purge to remove)"))
 
 
 # --------------------------------------------------------------------------- #
 # 說明 / 互動
 # --------------------------------------------------------------------------- #
 
-HELP_SECTIONS = [
-    ("測速", [
-        ("speed all", "全部來源 + ping + 外網 IP, 最後給統整報告"),
-        ("speed mlab|fast|cloudflare|ookla|libre", "單一來源測速"),
-        ("", "例: speed cloudflare --seconds 15    speed fast --upload"),
+def help_sections() -> list:
+    return [
+    (t("全部 (all)", "All"), [
+        ("all", t("外網 IP + ping + 測速 統整報告", "public IP + ping + speed summary report")),
+    ]),
+    (t("測速 (speed)", "Speed"), [
+        ("speed all", t("全部測速來源 (不含 ip / ping)", "all speed sources (no ip / ping)")),
+        ("speed mlab|fast|cloudflare|ookla|libre", t("單一來源測速", "single source")),
+        ("speed check", t("檢查測速工具, 可協助下載缺少的執行檔", "check speed tools, offer to download missing ones")),
+        ("", t("例: speed cloudflare --seconds 15    speed fast --upload",
+               "e.g. speed cloudflare --seconds 15    speed fast --upload")),
     ]),
     ("Ping", [
-        ("ping [targets...]", "對目標 ping (預設含 default gateway + 清單)"),
-        ("", "選項: -c/--count  -i/--interval  -W/--timeout  -s/--size  --method auto|icmp|system  --no-gateway"),
+        ("ping [targets...]", t("對目標 ping (預設含 default gateway + 清單)",
+                                "ping targets (includes default gateway + list)")),
+        ("", t("選項: -c/--count  -i/--interval  -W/--timeout  -s/--size  --method auto|icmp|system  --no-gateway",
+               "opts: -c/--count  -i/--interval  -W/--timeout  -s/--size  --method auto|icmp|system  --no-gateway")),
     ]),
-    ("顯示資訊 (show)", [
-        ("show ip", "外網 IP 與電信商"),
-        ("show net", "本機網路設定: DHCP/靜態, IP/遮罩, 閘道, 靜態路由, Sub IP"),
-        ("show tools", "檢查各來源工具是否可用 (含下載網址)"),
-        ("show config|targets|endpoints|theme|history|version", "各項目前狀態"),
-        ("netinfo [iface] [--all] [-i] [--refresh]", "等同 show net (netinfo 直接可用)"),
+    (t("外網 IP", "Public IP"), [
+        ("ip [-p provider]", t("查外網 IP 與電信商 (預設 ipinfo.io)",
+                               "public IP & ISP (default ipinfo.io)")),
     ]),
-    ("對測 (pair)", [
-        ("pair serve", "開對測伺服器 (優先 iperf3, 否則內建)"),
-        ("pair client <host>", "連到對測端 (--mode both|down|up --duration --streams)"),
-        ("pair history", "看對測歷史"),
+    (t("顯示資訊 (show)", "Show"), [
+        ("show ping", t("Ping 設定 (含目前閘道值)", "ping settings (with current gateway)")),
+        ("show tools", t("工具狀態 (* = all 會執行; 分 ping / 測速)",
+                         "tool status (* = runs under all; ping / speed)")),
+        ("show env", t("環境狀態檢查 (Python / 設定目錄 / 網路)",
+                       "environment check (Python / config dir / internet)")),
+        ("show interfaces", t("本機網路設定: DHCP/IP/閘道/路由", "local network: DHCP/IP/gateway/routes")),
+        ("show config|theme|history|version", t("各項目前狀態", "current state")),
+        ("netinfo [iface] [--all] [-i] [--refresh]", t("等同 show interfaces", "same as show interfaces")),
     ]),
-    ("設定 (config)", [
-        ("config show|path|edit|reset|export|import", "設定檔 (可匯出/匯入分享)"),
-        ("config set <key> <value>", "例: config set iperf.path /usr/local/bin/iperf3"),
-        ("config get <key>", "讀取設定值"),
-        ("config targets [list|add|del|set|gateway]", "ping 目標清單"),
-        ("config endpoints [list|set <來源> <值>]", "測速端點設定"),
-        ("config theme [list|set|reset|preset|export|import]", "顏色主題 (可自訂/匯出/匯入分享)"),
-        ("history", "歷史紀錄, 可輸入編號直接重跑"),
+    (t("對測 (pair)", "Pair"), [
+        ("pair serve", t("開對測伺服器 (優先 iperf3, 否則內建)", "run pair server (iperf3 or builtin)")),
+        ("pair client <host>", t("連到對測端 (--mode both|down|up --duration --streams)",
+                                 "connect to peer (--mode both|down|up --duration --streams)")),
+        ("pair history", t("看對測歷史", "pair history")),
     ]),
-    ("互動模式 (Cisco 風格)", [
-        ("console", "進入互動模式 (shell 亦可; 不帶參數也會倒數後跑預設)"),
-        ("show / configure / write / end", "console 內: show <x>, configure 進設定模式, write 存檔"),
-        ("refresh", "console 內: 清除本次快取 (netinfo / check / ip)"),
+    (t("設定 (config)", "Config"), [
+        ("config show|path|edit|reset|export|import", t("設定檔 (可匯出/匯入分享)",
+                                                        "config file (export/import)")),
+        ("config set <key> <value>", t("例: config set iperf.path /usr/local/bin/iperf3",
+                                       "e.g. config set iperf.path /usr/local/bin/iperf3")),
+        ("config get <key>", t("讀取設定值", "read a config value")),
+        ("config lang en|zh-TW", t("切換語系 (預設 en)", "switch language (default en)")),
+        ("config targets [list|add|del|set|gateway]", t("ping 目標清單", "ping target list")),
+        ("config endpoints [list|set <來源> <值>]", t("測速端點設定", "speed endpoint settings")),
+        ("config theme [list|set|reset|preset|export|import]", t("顏色主題", "color theme")),
+        ("history", t("歷史紀錄, 可輸入編號查看內容並重跑",
+                      "history; enter a number to view details and rerun")),
     ]),
-    ("版本 / 安裝", [
-        ("update [--reset-skip]", "檢查/更新到最新版本 (來源: update.repo)"),
-        ("version", "顯示版本"),
-        ("install [-y] | uninstall [--purge] [-y]", "安裝 / 移除"),
+    (t("互動模式 (Cisco 風格)", "Interactive (Cisco style)"), [
+        ("console", t("進入互動模式 (shell 亦可; 不帶參數也會倒數後跑預設)",
+                      "interactive mode (alias shell; no-arg runs default after countdown)")),
+        ("show / configure / write / end", t("console 內: show <x>, configure 進設定模式, write 存檔",
+                                             "in console: show <x>, configure, write to save")),
+        ("refresh", t("console 內: 清除本次快取 (netinfo / check / env / ip)",
+                      "in console: clear cache (netinfo / check / env / ip)")),
+    ]),
+    (t("版本 / 安裝", "Version / Install"), [
+        ("update [--reset-skip]", t("檢查/更新到最新版本 (來源: update.repo)",
+                                    "check/update to latest (update.repo)")),
+        ("version", t("顯示版本", "show version")),
+        ("install [-y] | uninstall [--purge] [-y]", t("安裝 / 移除", "install / uninstall")),
     ]),
 ]
 
 COMMAND_ORDER = [
-    "speed", "ping", "show", "pair", "config", "netinfo",
+    "speed", "all", "ping", "show", "pair", "config", "netinfo", "check", "ip",
     "update", "console", "install", "uninstall", "help", "refresh", "exit",
     "configure", "write", "no", "end",
 ]
 
-COMMAND_HELP = {
-    "speed": "測速 (all/mlab/fast/cloudflare/ookla/libre)",
-    "all": "全部來源 + ping + 外網 IP 統整報告",
-    "mlab": "M-Lab NDT7 測速",
-    "fast": "fast.com (Netflix) 測速",
-    "cloudflare": "Cloudflare 測速 (內建)",
-    "ookla": "Ookla speedtest.net 測速",
-    "libre": "LibreSpeed 測速",
-    "ping": "對目標 ping",
-    "ip": "查外網 IP 與電信商",
-    "check": "檢查各來源工具是否可用",
-    "netinfo": "顯示本機網路設定",
-    "pair": "對測 (serve / client / history)",
-    "history": "歷史紀錄, 可選取重跑",
-    "config": "設定檔 (show/path/edit/reset)",
-    "set": "設定值 set <key> <value>",
-    "get": "讀取設定值 get <key>",
-    "targets": "ping 目標清單管理",
-    "endpoints": "測速端點設定",
-    "theme": "顏色主題 (可自訂/匯出/匯入)",
-    "update": "檢查 / 更新版本",
-    "version": "顯示版本",
-    "console": "進入互動模式 (shell 亦可)",
-    "install": "安裝並加入 PATH",
-    "uninstall": "移除程式",
-    "help": "顯示完整說明",
-    "refresh": "清除本次快取 (netinfo / check / ip)",
-    "exit": "離開 console",
-    "show": "Cisco 風格: show <項目> (config/ip/tools/...)",
-    "configure": "進入設定模式 (configure / conf)",
-    "conf": "configure 的縮寫",
-    "write": "設定模式: 儲存設定到檔案 (write / save)",
-    "save": "write 的別名",
-    "no": "設定模式: 還原某項為預設 (no <key>)",
-    "end": "設定模式: 離開 (end / exit)",
+def command_help() -> dict:
+    return {
+    "speed": t("測速 (all/mlab/fast/cloudflare/ookla/libre)", "speed (all/mlab/fast/cloudflare/ookla/libre)"),
+    "all": t("外網 IP + ping + 測速 統整報告", "public IP + ping + speed summary"),
+    "mlab": t("M-Lab NDT7 測速", "M-Lab NDT7"),
+    "fast": t("fast.com (Netflix) 測速", "fast.com (Netflix)"),
+    "cloudflare": t("Cloudflare 測速 (內建)", "Cloudflare (builtin)"),
+    "ookla": t("Ookla speedtest.net 測速", "Ookla speedtest.net"),
+    "libre": t("LibreSpeed 測速", "LibreSpeed"),
+    "ping": t("對目標 ping", "ping targets"),
+    "ip": t("查外網 IP 與電信商", "public IP & ISP"),
+    "check": t("檢查各來源工具是否可用", "check tool availability"),
+    "netinfo": t("顯示本機網路設定", "local network settings"),
+    "pair": t("對測 (serve / client / history)", "pair (serve / client / history)"),
+    "history": t("歷史紀錄, 可選取查看/重跑", "history; view/rerun"),
+    "config": t("設定檔 (show/path/edit/reset)", "config (show/path/edit/reset)"),
+    "set": t("設定值 set <key> <value>", "set <key> <value>"),
+    "get": t("讀取設定值 get <key>", "get <key>"),
+    "targets": t("ping 目標清單管理", "ping target list"),
+    "endpoints": t("測速端點設定", "speed endpoints"),
+    "theme": t("顏色主題 (可自訂/匯出/匯入)", "color theme"),
+    "update": t("檢查 / 更新版本", "check / update version"),
+    "version": t("顯示版本", "show version"),
+    "console": t("進入互動模式 (shell 亦可)", "interactive mode (alias shell)"),
+    "install": t("安裝並加入 PATH", "install & add to PATH"),
+    "uninstall": t("移除程式", "uninstall"),
+    "help": t("顯示完整說明", "show full help"),
+    "refresh": t("清除本次快取 (netinfo / check / env / ip)", "clear cache (netinfo / check / env / ip)"),
+    "exit": t("離開 console", "quit console"),
+    "show": t("Cisco 風格: show <項目> (ping/tools/env/...)",
+              "Cisco style: show <topic> (ping/tools/env/...)"),
+    "configure": t("進入設定模式 (configure / conf)", "enter config mode (configure / conf)"),
+    "conf": t("configure 的縮寫", "alias of configure"),
+    "write": t("設定模式: 儲存設定到檔案 (write / save)", "config mode: save (write / save)"),
+    "save": t("write 的別名", "alias of write"),
+    "no": t("設定模式: 還原某項為預設 (no <key>)", "config mode: reset a key (no <key>)"),
+    "end": t("設定模式: 離開 (end / exit)", "config mode: leave (end / exit)"),
 }
 
 
 def print_help() -> None:
-    print(tcol("netspeed — 跨平台 CLI 網路測速工具箱", "title"))
+    print(tcol(t("netspeed — 跨平台 CLI 網路測速工具箱", "netspeed — cross-platform CLI network speed toolkit"),
+               "title") + "  " + tcol(f"v{VERSION}", "dim"))
     print()
-    print("用法: " + col("netspeed <command> [args...]", "bold"))
-    print("      " + col("netspeed", "bold") + "  (不帶參數 → 互動 console 模式; help 看指令, exit 離開)")
-    for title, items in HELP_SECTIONS:
+    print(t("用法: ", "Usage: ") + col("netspeed <command> [args...]", "bold"))
+    print("      " + col("netspeed", "bold")
+          + t("  (不帶參數 → 倒數後跑預設; console 進互動模式; exit 離開)",
+              "  (no args → run default after countdown; console for interactive; exit to quit)"))
+    for title, items in help_sections():
         print()
-        print(tcol(f"【{title}】", "heading"))
+        print(tcol(f"【{title}】" if LANG != "en" else f"[{title}]", "heading"))
         for name, desc in items:
             if name:
                 print("  " + tcol(f"{name:<34}", "command") + desc)
             else:
                 print("  " + " " * 34 + tcol(desc, "dim"))
     print()
-    print(tcol("【通用選項】", "heading"))
-    for name, desc in [("--json", "以 JSON 輸出"), ("--no-color", "關閉顏色"),
-                       ("--config <path>", "指定設定檔"), ("--no-save", "不寫入歷史紀錄"),
-                       ("--no-update-check", "本次不檢查更新")]:
+    print(tcol("【通用選項】" if LANG != "en" else "[Common options]", "heading"))
+    for name, desc in [("--json", t("以 JSON 輸出", "JSON output")),
+                       ("--no-color", t("關閉顏色", "disable color")),
+                       ("--config <path>", t("指定設定檔", "custom config path")),
+                       ("--no-save", t("不寫入歷史紀錄", "do not save history")),
+                       ("--no-update-check", t("本次不檢查更新", "skip update check"))]:
         print("  " + tcol(f"{name:<34}", "command") + desc)
+    print()
+    print(tcol(t("語系: config set lang en|zh-TW  (預設 en)",
+                 "Language: config set lang en|zh-TW  (default en)"), "dim"))
 
 
 # --------------------------------------------------------------------------- #
@@ -2822,10 +3335,10 @@ def build_parser() -> argparse.ArgumentParser:
     # 測速分層: speed <all|mlab|fast|cloudflare|ookla|libre>
     speed = sub.add_parser("speed", help="測速 (all / mlab / fast / cloudflare / ookla / libre)")
     speed_sub = speed.add_subparsers(dest="speed_cmd")
-    s_all = speed_sub.add_parser("all", parents=[common], help="全部來源 + ping + 外網 IP")
+    s_all = speed_sub.add_parser("all", parents=[common], help="全部測速來源 (不含 ip / ping)")
     s_all.add_argument("--sources", help="要跑的來源, 逗號分隔")
-    s_all.add_argument("--no-ping", action="store_true")
-    s_all.add_argument("--no-ip", action="store_true")
+    s_all.add_argument("--no-ping", action="store_true", help=argparse.SUPPRESS)
+    s_all.add_argument("--no-ip", action="store_true", help=argparse.SUPPRESS)
     s_all.add_argument("--seconds", type=float, default=None)
     for name, hlp in [
         ("mlab", "M-Lab NDT7"), ("fast", "fast.com (Netflix)"),
@@ -2838,8 +3351,16 @@ def build_parser() -> argparse.ArgumentParser:
             s.add_argument("--upload", action="store_true")
         if name == "cloudflare":
             s.add_argument("--seconds", type=float, default=None)
+    s_ck = speed_sub.add_parser("check", parents=[common],
+                                help="檢查測速工具, 並可協助下載缺少的執行檔")
+    s_ck.add_argument("--refresh", action="store_true", help="重新檢查 (不讀快取)")
+    s_ck.add_argument("-y", "--yes", action="store_true", help="不詢問, 直接嘗試下載")
 
-
+    al = sub.add_parser("all", parents=[common], help="全部: 外網 IP + ping + 測速 (統整報告)")
+    al.add_argument("--sources", help="要跑的來源, 逗號分隔")
+    al.add_argument("--no-ping", action="store_true", help="略過 ping")
+    al.add_argument("--no-ip", action="store_true", help="略過外網 IP")
+    al.add_argument("--seconds", type=float, default=None)
 
     pp = sub.add_parser("ping", parents=[common], help="對目標 ping")
     pp.add_argument("targets", nargs="*")
@@ -2852,6 +3373,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     ip = sub.add_parser("ip", parents=[common], help="查外網 IP 與電信商")
     ip.add_argument("--refresh", action="store_true", help="重新查詢 (不讀快取)")
+    ip.add_argument("-p", "--provider", choices=list(IP_PROVIDERS),
+                    help="IP 查詢來源 (預設 ipinfo.io)")
 
     ck = sub.add_parser("check", parents=[common], help="檢查各來源工具是否可用")
     ck.add_argument("--refresh", action="store_true", help="重新檢查 (不讀快取)")
@@ -2886,7 +3409,7 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--run", type=int)
 
     # 設定分層: config <show|set|get|targets|endpoints|theme|path|edit|reset|export|import>
-    cf = sub.add_parser("config", help="設定 (show/set/get/targets/endpoints/theme/...)")
+    cf = sub.add_parser("config", parents=[common], help="設定 (show/set/get/targets/endpoints/theme/...)")
     cf_sub = cf.add_subparsers(dest="cfg_cmd")
     for nm in ("show", "path", "edit", "reset"):
         cf_sub.add_parser(nm, parents=[common])
@@ -2904,6 +3427,8 @@ def build_parser() -> argparse.ArgumentParser:
     _cfh.add_argument("action", nargs="?", default="list",
                       choices=["list", "set", "reset", "preset", "export", "import"])
     _cfh.add_argument("values", nargs="*")
+    _cfl = cf_sub.add_parser("lang", parents=[common], help="語系 (en / zh-TW)")
+    _cfl.add_argument("value", nargs="?")
 
     # 平鋪設定指令 (隱藏, 仍可用)
     th = sub.add_parser("theme", parents=[common], help=argparse.SUPPRESS)
@@ -2940,6 +3465,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("version", parents=[common], help="顯示版本")
 
+    for _nm in ("show-ping", "show-tools", "show-env"):
+        _sp = sub.add_parser(_nm, parents=[common], help=argparse.SUPPRESS)
+        if _nm in ("show-tools", "show-env"):
+            _sp.add_argument("--refresh", action="store_true")
+
     sub.add_parser("console", parents=[common], aliases=["shell"], help="進入互動模式")
 
     sub.add_parser("help", help="顯示完整說明")
@@ -2966,7 +3496,9 @@ def _dispatch_config(cfg: dict, args) -> None:
     elif sub == "set":
         set_dotted(cfg, args.key, coerce(args.value))
         save_config(cfg, getattr(args, "config", None))
-        ok(f"已設定 {args.key} = {get_dotted(cfg, args.key)}")
+        apply_theme(cfg)
+        ok(t(f"已設定 {args.key} = {get_dotted(cfg, args.key)}",
+             f"Set {args.key} = {get_dotted(cfg, args.key)}"))
     elif sub == "get":
         print(json.dumps(get_dotted(cfg, args.key), ensure_ascii=False))
     elif sub == "targets":
@@ -2975,8 +3507,17 @@ def _dispatch_config(cfg: dict, args) -> None:
         cmd_endpoints(cfg, argparse.Namespace(action=args.action, values=args.values))
     elif sub == "theme":
         cmd_theme(cfg, argparse.Namespace(action=args.action, values=args.values, **ns))
+    elif sub == "lang":
+        if getattr(args, "value", None):
+            set_dotted(cfg, "lang", args.value)
+            save_config(cfg, getattr(args, "config", None))
+            apply_theme(cfg)
+            ok(t(f"已切換語系: {LANG} ({LANG_NAMES.get(LANG, LANG)})",
+                 f"Language set: {LANG} ({LANG_NAMES.get(LANG, LANG)})"))
+        else:
+            print(f"{LANG} ({LANG_NAMES.get(LANG, LANG)})")
     else:
-        warn(f"未知 config 子指令: {sub}")
+        warn(t(f"未知 config 子指令: {sub}", f"Unknown config subcommand: {sub}"))
 
 
 def _dispatch(args, cfg: dict, parser) -> None:
@@ -2988,9 +3529,11 @@ def _dispatch(args, cfg: dict, parser) -> None:
     elif cmd == "speed":
         sc = getattr(args, "speed_cmd", None)
         if sc == "all":
-            cmd_all(cfg, args)
+            cmd_speed_all(cfg, args)
         elif sc in ("mlab", "fast", "cloudflare", "ookla", "libre"):
             cmd_source(sc, cfg, args)
+        elif sc in ("check", "tools"):
+            cmd_speed_check(cfg, args)
         else:
             parser.parse_args(["speed", "--help"])
     elif cmd == "ping":
@@ -2999,6 +3542,12 @@ def _dispatch(args, cfg: dict, parser) -> None:
         cmd_ip(cfg, args)
     elif cmd == "check":
         cmd_check(cfg, args)
+    elif cmd == "show-ping":
+        cmd_show_ping(cfg, args)
+    elif cmd == "show-tools":
+        cmd_show_tools(cfg, args)
+    elif cmd == "show-env":
+        cmd_show_env(cfg, args)
     elif cmd == "netinfo":
         cmd_netinfo(cfg, args)
     elif cmd == "pair":
@@ -3018,7 +3567,9 @@ def _dispatch(args, cfg: dict, parser) -> None:
     elif cmd == "set":
         set_dotted(cfg, args.key, coerce(args.value))
         save_config(cfg, getattr(args, "config", None))
-        ok(f"已設定 {args.key} = {get_dotted(cfg, args.key)}")
+        apply_theme(cfg)
+        ok(t(f"已設定 {args.key} = {get_dotted(cfg, args.key)}",
+             f"Set {args.key} = {get_dotted(cfg, args.key)}"))
     elif cmd == "get":
         print(json.dumps(get_dotted(cfg, args.key), ensure_ascii=False))
     elif cmd == "targets":
@@ -3029,7 +3580,8 @@ def _dispatch(args, cfg: dict, parser) -> None:
         cmd_theme(cfg, args)
     elif cmd == "refresh":
         cache_clear()
-        ok("已清除本次快取 (netinfo / check / ip 將重新讀取)")
+        ok(t("已清除本次快取 (netinfo / check / env / ip 將重新讀取)",
+             "Cache cleared (netinfo / check / env / ip will reload)"))
     elif cmd == "install":
         cmd_install(cfg, args)
     elif cmd == "uninstall":
@@ -3052,11 +3604,16 @@ def run_command(argv, cfg: dict | None = None) -> int:
     if argv and argv[0].lower() in ALIAS_MAP:
         argv = ALIAS_MAP[argv[0].lower()] + argv[1:]
     if argv and argv[0].lower() == "show":
-        mapped = _resolve_show(argv[1:])
+        rest = argv[1:]
+        idx = 0
+        while idx < len(rest) and not rest[idx].startswith("-"):
+            idx += 1
+        topic_tokens, flags = rest[:idx], rest[idx:]
+        mapped = _resolve_show(topic_tokens)
         if mapped is None:
             _print_show_topics()
             return 0
-        argv = mapped
+        argv = mapped + flags
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
@@ -3073,6 +3630,9 @@ def run_command(argv, cfg: dict | None = None) -> int:
     if cfg is None:
         cfg = load_config(getattr(args, "config", None))
     apply_theme(cfg)
+
+    if not getattr(args, "json", False) and args.cmd not in ("help", "version") and not _IN_CONSOLE:
+        print(tcol(f"netspeed v{VERSION}", "title"))
 
     if (not getattr(args, "no_update_check", False) and not getattr(args, "json", False)
             and args.cmd not in ("help", "version", "update")):
@@ -3096,6 +3656,7 @@ COMMANDS = {
     "pair", "history", "config", "set", "get", "targets", "endpoints", "theme",
     "check", "netinfo", "update", "version", "install", "uninstall",
     "console", "shell", "help", "refresh", "speed",
+    "show-ping", "show-tools", "show-env",
     # Cisco 風格 (由 console / run_command 前置處理)
     "show", "configure", "conf", "write", "save", "no", "end",
 }
@@ -3103,22 +3664,17 @@ COMMANDS = {
 # Cisco 風格: show <x> 對應到既有指令
 SHOW_MAP = {
     "config": ["config"],
-    "running-config": ["config"],
-    "ip": ["ip"],
-    "net": ["netinfo"],
+    "ping": ["show-ping"],
     "interfaces": ["netinfo"],
-    "tools": ["check"],
-    "targets": ["targets"],
-    "endpoints": ["endpoints"],
+    "tools": ["show-tools"],
+    "env": ["show-env"],
     "theme": ["theme"],
     "history": ["history"],
     "version": ["version"],
-    "speed": ["speed", "all"],
 }
 
 # 平鋪別名 -> 分層指令 (仍可用, 但不列在 help)
 ALIAS_MAP = {
-    "all": ["speed", "all"],
     "mlab": ["speed", "mlab"],
     "fast": ["speed", "fast"],
     "cloudflare": ["speed", "cloudflare"],
@@ -3138,7 +3694,7 @@ def _resolve_show(tokens: list):
 
 
 def _print_show_topics() -> None:
-    print(tcol("可用的 show 項目:", "heading"))
+    print(tcol(t("可用的 show 項目:", "Available show topics:"), "heading"))
     for k in SHOW_MAP:
         print("  " + tcol(f"show {k:<18}", "command") + "→ " + " ".join(SHOW_MAP[k]))
 
@@ -3152,7 +3708,7 @@ ARG_CANDIDATES = {
     "pair": ["serve", "client", "history"],
     "targets": ["list", "add", "del", "set", "gateway"],
     "endpoints": ["list", "set"],
-    "config": ["show", "set", "get", "targets", "endpoints", "theme",
+    "config": ["show", "set", "get", "targets", "endpoints", "theme", "lang",
                "path", "edit", "reset", "export", "import"],
     "theme": ["list", "set", "reset", "preset", "export", "import"],
     "history": ["--kind", "--limit", "--run"],
@@ -3161,10 +3717,11 @@ ARG_CANDIDATES = {
     "fast": ["--upload"],
     "cloudflare": ["--seconds"],
     "check": ["--refresh", "--json"],
+    "ip": ["--refresh", "-p", "--provider"],
     "install": ["--no-path", "-y"],
     "uninstall": ["--purge", "--no-path", "-y"],
     "show": list(SHOW_MAP.keys()),
-    "speed": ["all", "mlab", "fast", "cloudflare", "ookla", "libre"],
+    "speed": ["all", "mlab", "fast", "cloudflare", "ookla", "libre", "check"],
 }
 
 PAIR_OPTS = {
@@ -3173,19 +3730,26 @@ PAIR_OPTS = {
     "history": [],
 }
 
-ARG_HELP = {
+def arg_help() -> dict:
+    return {
     "serve": "開對測伺服器", "client": "連到對測端", "history": "對測歷史",
     "list": "列出", "add": "新增", "del": "刪除", "set": "設定", "gateway": "顯示 default gateway",
     "show": "顯示設定", "path": "顯示設定檔路徑", "edit": "用編輯器開啟", "reset": "重設為預設",
     "export": "匯出成檔案", "import": "從檔案匯入", "preset": "套用主題預設組",
+    "lang": "語系 (en / zh-TW)",
+    "all": "全部測速來源", "check": "檢查測速工具並可協助下載", "tools": "檢查測速工具",
+    "mlab": "M-Lab", "fast": "fast.com", "cloudflare": "Cloudflare", "ookla": "Ookla", "libre": "LibreSpeed",
+    "ping": "Ping 設定", "env": "環境狀態檢查", "interfaces": "本機網路設定",
     "--all": "顯示所有介面", "--refresh": "重新讀取 (不讀快取)", "--json": "JSON 輸出",
     "--sources": "指定來源", "--no-ping": "略過 ping", "--no-ip": "略過外網 IP",
     "--seconds": "秒數", "--upload": "加測上傳", "--kind": "篩選類型", "--limit": "筆數",
     "--run": "直接重跑編號", "--no-path": "不動 PATH", "-y": "不詢問",
+    "-p": "IP 查詢來源", "--provider": "IP 查詢來源 (ipinfo.io/ifconfig.co/ip-api.com)",
     "--purge": "同時刪除設定", "--reset-skip": "清除不再通知版本",
 }
 
 _CONSOLE_CFG: dict | None = None
+_IN_CONSOLE = False
 
 
 def _config_keys() -> list:
@@ -3257,14 +3821,33 @@ def _complete_candidates(text: str) -> list:
     return _candidates_for(text)
 
 
+def _expand_prefix(token: str, in_config: bool = False) -> str:
+    """指令前綴唯一符合時自動補齊 (in -> install, wr -> write)。"""
+    low = token.lower()
+    if not low:
+        return token
+    if in_config:
+        pool = ["set", "no", "write", "save", "end", "exit", "show", "help",
+                "config", "targets", "endpoints", "theme", "get", "check",
+                "netinfo", "ip", "version"]
+    else:
+        pool = COMMAND_ORDER
+    matches = [c for c in pool if c.startswith(low)]
+    if len(matches) == 1 and matches[0] != low:
+        return matches[0]
+    return token
+
+
 def _print_candidates(prompt: str, text: str) -> None:
     cands = _candidates_for(text)
     at_arg = " " in text
     sys.stdout.write("\r\n")
     if cands:
         for c in cands:
-            desc = (ARG_HELP if at_arg else COMMAND_HELP).get(c, "")
+            desc = (arg_help() if at_arg else command_help()).get(c, "")
             sys.stdout.write("  " + tcol(f"{c:<16}", "command") + desc + "\r\n")
+    else:
+        sys.stdout.write("\r\n")
     sys.stdout.write(prompt + text)
     sys.stdout.flush()
 
@@ -3284,6 +3867,8 @@ def _tab_complete(prompt: str, text: str) -> str:
     parts = text.split(" ")
     cands = [c for c in _arg_candidates(parts[0].lower(), parts[1:-1]) if c.startswith(partial)]
     if not cands:
+        sys.stdout.write("\r\n")
+        sys.stdout.flush()
         return text
     completion = cands[0] if len(cands) == 1 else os.path.commonprefix(cands)
     if len(completion) > len(partial):
@@ -3482,28 +4067,28 @@ def _config_mode_cmd(tokens: list, cfg: dict, state: dict):
     if cmd in ("write", "save"):
         save_config(cfg, force=True)
         state["dirty"] = False
-        ok("已儲存設定 (write)")
+        ok(t("已儲存設定 (write)", "Config saved (write)"))
         return None
     if cmd == "set":
         if len(tokens) < 3:
-            error("用法: set <key> <value>")
+            error(t("用法: set <key> <value>", "Usage: set <key> <value>"))
             return None
         set_dotted(cfg, tokens[1], coerce(" ".join(tokens[2:])))
         apply_theme(cfg)
         state["dirty"] = True
-        ok(f"set {tokens[1]} = {get_dotted(cfg, tokens[1])}   (尚未 write)")
+        ok(f"set {tokens[1]} = {get_dotted(cfg, tokens[1])}   ({t('尚未 write', 'not written yet')})")
         return None
     if cmd == "no":
         if len(tokens) < 2:
-            error("用法: no <key>")
+            error(t("用法: no <key>", "Usage: no <key>"))
             return None
         if tokens[1] not in _config_keys():
-            warn(f"未知 key: {tokens[1]}")
+            warn(t(f"未知 key: {tokens[1]}", f"Unknown key: {tokens[1]}"))
             return None
         set_dotted(cfg, tokens[1], get_dotted(DEFAULT_CONFIG, tokens[1]))
         apply_theme(cfg)
         state["dirty"] = True
-        ok(f"no {tokens[1]}   (尚未 write)")
+        ok(f"no {tokens[1]}   ({t('尚未 write', 'not written yet')})")
         return None
     if cmd in ("endpoints", "targets", "theme", "config"):
         sub_parser = build_parser()
@@ -3520,12 +4105,14 @@ def _config_mode_cmd(tokens: list, cfg: dict, state: dict):
     if cmd == "help":
         print_help()
         return None
-    error("設定模式不支援此指令 (可用: set / no / endpoints / targets / theme / show / write / end)")
+    error(t("設定模式不支援此指令 (可用: set / no / endpoints / targets / theme / show / write / end)",
+            "Unsupported in config mode (use: set / no / endpoints / targets / theme / show / write / end)"))
     return None
 
 
 def console(start_in_config: bool = False) -> int:
-    global USE_COLOR, _CONSOLE_CFG, _DEFER_SAVE
+    global USE_COLOR, _CONSOLE_CFG, _DEFER_SAVE, _IN_CONSOLE
+    _IN_CONSOLE = True
     if not sys.stdout.isatty():
         USE_COLOR = False
     cfg = load_config()
@@ -3535,9 +4122,13 @@ def console(start_in_config: bool = False) -> int:
     in_config = start_in_config
     _DEFER_SAVE = start_in_config
     state = {"dirty": False}
-    print(tcol("netspeed 互動模式", "title"))
-    print(tcol("輸入 help 看指令; ? 候選, Tab 補齊, ↑↓ 歷史, ←→ 移動游標; exit 離開。", "dim"))
-    print(tcol(f"設定檔: {config_path()}", "dim"))
+    print(tcol("netspeed " + t("互動模式", "interactive mode"), "title") + "  " + tcol(f"v{VERSION}", "dim"))
+    print(tcol(t("輸入 help 看指令; ? 候選, Tab 補齊, ↑↓ 歷史, ←→ 移動游標; exit 離開。",
+                 "Type help for commands; ? candidates, Tab complete, ↑↓ history, ←→ move cursor; exit to quit."),
+               "dim"))
+    print(tcol(t(f"設定檔: {config_path()}", f"Config: {config_path()}"), "dim"))
+    print(tcol(t("指令前綴會自動補齊 (例如 in → install, wr → write)。",
+                 "Command prefixes auto-complete (e.g. in → install, wr → write)."), "dim"))
     print()
     try:
         check_update(cfg, interactive=sys.stdin.isatty())
@@ -3558,10 +4149,11 @@ def console(start_in_config: bool = False) -> int:
         try:
             tokens = shlex.split(line)
         except ValueError as exc:
-            error(f"無法解析: {exc}")
+            error(t(f"無法解析: {exc}", f"Cannot parse: {exc}"))
             continue
         if not tokens:
             continue
+        tokens[0] = _expand_prefix(tokens[0], in_config)
         first = tokens[0].lower()
 
         if in_config:
@@ -3570,7 +4162,8 @@ def console(start_in_config: bool = False) -> int:
                 _DEFER_SAVE = False
                 in_config = False
                 if state["dirty"]:
-                    warn("已離開設定模式; 有變更尚未 write, 下次執行仍為舊設定")
+                    warn(t("已離開設定模式; 有變更尚未 write, 下次執行仍為舊設定",
+                           "Left config mode; changes not written, next run uses old settings"))
                     state["dirty"] = False
             continue
 
@@ -3578,37 +4171,41 @@ def console(start_in_config: bool = False) -> int:
             break
         if first == "refresh":
             cache_clear()
-            ok("已清除本次快取 (netinfo / check / ip 將重新讀取)")
+            ok(t("已清除本次快取 (netinfo / check / env / ip 將重新讀取)",
+                 "Cache cleared (netinfo / check / env / ip will reload)"))
             continue
         if first in ("configure", "conf"):
             _DEFER_SAVE = True
             in_config = True
             state["dirty"] = False
-            ok("進入設定模式。變更即時套用; 需 write 才會寫入檔案。end 離開。")
+            ok(t("進入設定模式。變更即時套用; 需 write 才會寫入檔案。end 離開。",
+                 "Entered config mode. Changes apply live; write to persist. end to leave."))
             continue
         if first in ("write", "save"):
             save_config(cfg, force=True)
-            ok("已儲存設定 (write)")
+            ok(t("已儲存設定 (write)", "Config saved (write)"))
             continue
         if first == "no":
-            error("no 僅能在設定模式使用 (先輸入 configure)")
+            error(t("no 僅能在設定模式使用 (先輸入 configure)",
+                    "no is only available in config mode (enter configure first)"))
             continue
         if first == "end":
-            warn("目前不在設定模式")
+            warn(t("目前不在設定模式", "Not in config mode"))
             continue
         if first not in COMMANDS:
             cands = _candidates_for(first)
             if cands and len(tokens) == 1:
                 print()
                 for c in cands:
-                    print("  " + tcol(f"{c:<16}", "command") + COMMAND_HELP.get(c, ""))
+                    print("  " + tcol(f"{c:<16}", "command") + command_help().get(c, ""))
                 continue
-            error(f"未知指令: {tokens[0]}  (輸入 help 查看可用指令)")
+            error(t(f"未知指令: {tokens[0]}  (輸入 help 查看可用指令)",
+                    f"Unknown command: {tokens[0]}  (type help)"))
             continue
         run_command(tokens, cfg)
     if in_config:
         _DEFER_SAVE = False
-    print("bye")
+    print(t("bye", "bye"))
     return 0
 
 
@@ -3637,10 +4234,15 @@ def _countdown_wait(seconds: int) -> str:
             return "run"
         return "cancel"
 
+    def _msg(i: int) -> str:
+        return ("\r  " + t(f"倒數 {i} 秒...  (按 Enter 直接執行, c 進互動模式)",
+                            f"Countdown {i}s...  (Enter to run now, c for console)") + "   ")
+
     if os.name == "nt":
         import msvcrt
         for i in range(seconds, 0, -1):
-            sys.stdout.write(f"\r  倒數 {i} 秒... ")
+            m = _msg(i)
+            sys.stdout.write(m)
             sys.stdout.flush()
             end = time.time() + 1
             while time.time() < end:
@@ -3651,7 +4253,7 @@ def _countdown_wait(seconds: int) -> str:
                         return "cancel"
                     return _decide(ch)
                 time.sleep(0.05)
-        sys.stdout.write("\r" + " " * 24 + "\r")
+        sys.stdout.write("\r" + " " * len(_msg(seconds)) + "\r")
         sys.stdout.flush()
         return "run"
 
@@ -3663,7 +4265,8 @@ def _countdown_wait(seconds: int) -> str:
     try:
         tty.setraw(fd)
         for i in range(seconds, 0, -1):
-            sys.stdout.write(f"\r  倒數 {i} 秒... ")
+            m = _msg(i)
+            sys.stdout.write(m)
             sys.stdout.flush()
             end = time.time() + 1
             while time.time() < end:
@@ -3675,7 +4278,7 @@ def _countdown_wait(seconds: int) -> str:
                             os.read(fd, 1)
                         return "cancel"
                     return _decide(ch)
-        sys.stdout.write("\r" + " " * 24 + "\r")
+        sys.stdout.write("\r" + " " * len(_msg(seconds)) + "\r")
         sys.stdout.flush()
         return "run"
     finally:
@@ -3685,23 +4288,27 @@ def _countdown_wait(seconds: int) -> str:
 def run_default_with_countdown(seconds: int = 5) -> int:
     cfg = load_config()
     apply_theme(cfg)
+    print(tcol(f"netspeed v{VERSION}", "title"))
     try:
         check_update(cfg, interactive=True)
     except Exception:
         pass
     sources = cfg.get("sources", DEFAULT_CONFIG["sources"])
-    section("預設測速")
-    print("  將以預設設定執行:")
-    print("    外網 IP / 電信商 + Ping + 測速來源: "
+    section(t("預設測速", "Default speed test"))
+    print("  " + t("將以預設設定執行:", "Will run with default settings:"))
+    print("    " + t("外網 IP / 電信商 + Ping + 測速來源: ",
+                     "Public IP / ISP + Ping + sources: ")
           + ", ".join(SOURCE_LABELS.get(s, s) for s in sources))
-    print(tcol("  倒數中可按鍵: [c] 進入互動模式 / [其他鍵] 取消 / 不按鍵則倒數後執行", "dim"))
+    print(tcol(t("  倒數中可按鍵: [c] 進入互動模式 / [其他鍵] 取消 / 不按鍵則倒數後執行",
+                 "  During countdown: [c] console / [any other key] cancel / no key = run"), "dim"))
+    print(tcol(t("  直接按 Enter 可立即開始測試。", "  Press Enter to start immediately."), "dim"))
     print()
     action = _countdown_wait(seconds)
     if action == "console":
-        print("進入互動模式。")
+        print(t("進入互動模式。", "Entering interactive mode."))
         return console()
     if action == "cancel":
-        print("已取消。")
+        print(t("已取消。", "Cancelled."))
         return 0
     args = argparse.Namespace(sources=None, no_ping=False, no_ip=False, seconds=None,
                               json=False, no_color=False, config=None, no_save=False,
