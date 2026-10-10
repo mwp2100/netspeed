@@ -30,24 +30,29 @@ python netspeed.py all
 python3 netspeed.py all
 ```
 
-**不帶參數**會進入互動 console 模式（類似 `diskpart`），輸入 `help` 看指令、`exit` 離開：
+**不帶參數**會先顯示「將以預設設定執行」並**倒數**，倒數完就跑預設測速（外網 IP + Ping + 全部來源）；倒數中按 `Ctrl+C` 會取消並進入互動模式。
 
 ```bash
-python netspeed.py
+python netspeed.py            # 倒數 5 秒 → 跑預設測速
+python netspeed.py console    # 直接進入互動 console（shell 亦可）
+```
+
+互動 console（類似 `diskpart`），輸入 `help` 看指令、`exit` 離開：
+
+```bash
 # netspeed> help
-# netspeed> check
-# netspeed> netinfo
-# netspeed> all
+# netspeed> show net
+# netspeed> speed cloudflare
 # netspeed> exit
 ```
 
 輸入時的輔助（像 diskpart 一樣）：
 
-- 打 `i` 再按 `?` → 列出 `ip`、`install` 及說明。
-- 接著打 `n`（變成 `in`）按 `Tab` → 自動補成 `install`。
-- 若輸入已是完整指令（例如 `ip`），直接 `Enter` 就會執行；`Tab` 補齊後 `Enter` 也直接執行。
-- **參數也能補齊**：例如 `netinfo ` 再按 `Tab` 會列出可選介面與選項；`pair ` 會列出 `serve/client/history`；
-  `set theme.` 會列出所有 `theme.*` 設定鍵。輸入部分字元再按 `?` 會依前綴篩選。
+- 打 `sh` 再按 `?` → 列出 `show`；打 `s` 會列出 `speed`、`show`。
+- 接著打 `o`（變成 `sho`）按 `Tab` → 自動補成 `show`。
+- 若輸入已是完整指令（例如 `show`），直接 `Enter` 就會執行；`Tab` 補齊後 `Enter` 也直接執行。
+- **參數也能補齊**：`show ` 會列出 `config/ip/net/tools/...`；`speed ` 會列出 `all/mlab/fast/...`；
+  `netinfo ` 會列出可選介面與選項；`config ` 會列出子指令。輸入部分字元再按 `?` 會依前綴篩選。
 - 較慢的讀取（`netinfo`、`check`、`ip`）第一次執行後會**快取**，之後在同一 console 內立即回應；
   要強制重讀用 `--refresh` 或輸入 `refresh` 清快取。
 - **歷史與游標**：按 `↑`/`↓` 叫回上/下一筆指令，`←`/`→` 移動游標，`Home`/`End` 到行首/行尾，`Delete` 刪除。
@@ -115,42 +120,58 @@ python3 netspeed.py uninstall --purge    # macOS / Linux
 
 ## 5. 指令總覽
 
+指令採分層（top-level 精簡）：
+
 ```
-netspeed                        進入互動 console 模式（輸入 help / exit）
-netspeed check                  檢查各來源工具是否可用（執行前先確認）
-netspeed netinfo [介面] [--all] 本機網路設定：DHCP/靜態、IP/遮罩、閘道、靜態路由、Sub IP
-netspeed all                    外網IP → Ping → 全部來源 → 統整報告
-netspeed mlab|fast|cloudflare|ookla|libre
+netspeed                        倒數後跑預設測速（外網IP + Ping + 全部來源）
+netspeed console                進入互動模式（shell 亦可）
+
+netspeed speed all              測速：全部來源 → 統整報告
+netspeed speed mlab|fast|cloudflare|ookla|libre
 netspeed ping [目標...]         預設含 default gateway 與清單
-netspeed ip                     外網 IP 與電信商
+
+netspeed show ip                外網 IP 與電信商
+netspeed show net               本機網路設定（DHCP/靜態、IP/遮罩、閘道、靜態路由、Sub IP）
+netspeed show tools             檢查各來源工具是否可用（含下載網址）
+netspeed show config|targets|endpoints|theme|history|version
+netspeed netinfo [介面] [--all] [-i] [--refresh]   等同 show net
+
 netspeed pair serve             開對測伺服器（優先 iperf3，否則內建）
 netspeed pair client <host>     連到對測端（下載/上傳/雙向）
 netspeed pair history           對測歷史
+
+netspeed config show|path|edit|reset|export|import   設定檔（可匯出/匯入分享）
+netspeed config set <key> <value>   例: config set iperf.path /usr/local/bin/iperf3
+netspeed config get <key>
+netspeed config targets [list|add|del|set|gateway]
+netspeed config endpoints [list|set <來源> <值>]
+netspeed config theme [list|set|reset|preset|export|import]
 netspeed history                歷史紀錄，可輸入編號直接重跑
-netspeed targets [list|add|del|set|gateway]
-netspeed endpoints [list|set <來源> <值>]
-netspeed config [show|path|edit|reset]
-netspeed set <key> <value>      例: set iperf.path /usr/local/bin/iperf3
-netspeed get <key>
-netspeed theme [list|set|reset|preset|export|import]
+
 netspeed update [--reset-skip]  檢查/更新到最新版本（來源: update.repo）
 netspeed version                顯示版本
 netspeed install [-y] | uninstall [--purge] [-y]
 
 # Cisco 風格（console 內）
-netspeed show config            等同 netspeed config（也支援 show ip / show tools / show conf 縮寫）
-netspeed configure              進入設定模式（提示字元變 netspeed(config)#）
+netspeed> show config           等同 config（也支援 show ip / show tools / show conf 縮寫）
+netspeed> configure             進入設定模式（提示字元變 netspeed(config)#）
 ```
+
+> 為精簡 top-level 項目，以下平鋪指令**仍可用但不在 help 顯示**，建議改用分層寫法：
+> `all`/`mlab`/`fast`/`cloudflare`/`ookla`/`libre` → `speed <x>`；
+> `set`/`get`/`targets`/`endpoints`/`theme` → `config <x>`。
+> `ip`、`check`、`netinfo` 仍為 top-level，也有 `show ip`/`show tools`/`show net` 等別名。
 
 常用選項：`--json`、`--no-color`、`--no-save`、`--config <path>`、`--no-update-check`。
 
 ### 範例
 
 ```bash
-netspeed check
-netspeed netinfo                 # 多介面時會列出並詢問要顯示哪個
+netspeed show tools                                  # 檢查工具
+netspeed netinfo                                     # 自動顯示有 default route 的介面
+netspeed netinfo -i                                  # 互動選單選介面 (Enter/q 離開)
 netspeed netinfo --all --json
-netspeed all --sources cloudflare,ookla --seconds 15
+netspeed speed all --sources cloudflare,ookla --seconds 15
 netspeed ping 168.95.1.1 -c 10 -i 0.5 -W 2 -s 56
 netspeed pair serve --port 5201
 netspeed pair client 192.168.1.20 --mode both --duration 10 --streams 4

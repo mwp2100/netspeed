@@ -41,7 +41,7 @@ import threading
 import time
 import urllib.request
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 APP = "netspeed"
 PROTO_TAG = "NETSPEED1"
 
@@ -1982,6 +1982,40 @@ def _print_routes(routes: list) -> None:
               f"{str(r.get('iface') or ''):<12} {str(r.get('metric') or ''):>6}  {r.get('proto') or ''}")
 
 
+def _default_iface(data: dict):
+    real = _real_ifaces(data)
+    for ifc in real:
+        if ifc.get("gateway"):
+            return ifc
+    return real[0] if real else None
+
+
+def _netinfo_menu(real: list, all_ifaces: list):
+    if not real:
+        return all_ifaces
+    print("  選擇要顯示的介面:")
+    for i, ifc in enumerate(real, 1):
+        ips = ", ".join(x.get("cidr", "?") for x in ifc.get("ipv4", []))
+        gw = ifc.get("gateway")
+        tag = tcol("  (default route)", "dim") if gw else ""
+        print(f"    [{i}] {ifc['name']:<24} {ips}{tag}")
+    print(tcol("    [a] 全部    [Enter/q] 離開", "dim"))
+    try:
+        choice = input(col("  請輸入: ", "bold")).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    if choice in ("", "q", "quit", "exit"):
+        info("已取消。")
+        return None
+    if choice == "a":
+        return real
+    if choice.isdigit() and 1 <= int(choice) <= len(real):
+        return [real[int(choice) - 1]]
+    warn("無效的選擇")
+    return None
+
+
 def cmd_netinfo(cfg: dict, args) -> None:
     data = collect_netinfo(refresh=getattr(args, "refresh", False))
     if getattr(args, "json", False):
@@ -1996,23 +2030,15 @@ def cmd_netinfo(cfg: dict, args) -> None:
         if not selected:
             error(f"找不到介面: {args.interface}")
             return
-    elif getattr(args, "all", False) or len(real) <= 1 or not sys.stdin.isatty():
+    elif getattr(args, "all", False):
         selected = real or all_ifaces
+    elif getattr(args, "select", False):
+        selected = _netinfo_menu(real, all_ifaces)
+        if selected is None:
+            return
     else:
-        section("系統網路資訊")
-        print("  偵測到多個網路介面, 請選擇要顯示的介面:")
-        for i, ifc in enumerate(real, 1):
-            ips = ", ".join(x.get("cidr", "?") for x in ifc.get("ipv4", []))
-            print(f"    [{i}] {ifc['name']:<20} {ips}")
-        try:
-            choice = input(col("  輸入編號 (Enter 顯示全部): ", "bold")).strip()
-        except (EOFError, KeyboardInterrupt):
-            choice = ""
-        if choice.isdigit() and 1 <= int(choice) <= len(real):
-            selected = [real[int(choice) - 1]]
-        else:
-            selected = real
-        print()
+        default = _default_iface(data)
+        selected = [default] if default else (real or all_ifaces)
 
     if not selected:
         error("找不到作用中的網路介面")
@@ -2022,6 +2048,10 @@ def cmd_netinfo(cfg: dict, args) -> None:
     for ifc in selected:
         _print_iface(ifc)
         print()
+
+    if (not getattr(args, "all", False) and not getattr(args, "interface", None)
+            and not getattr(args, "select", False) and len(real) > 1):
+        print(tcol(f"  (偵測到 {len(real)} 個介面; netinfo -i 可選擇, netinfo --all 顯示全部)", "dim"))
 
     routes = data.get("routes", [])
     if getattr(args, "interface", None):
@@ -2495,71 +2525,56 @@ def cmd_uninstall(cfg: dict, args) -> None:
 # --------------------------------------------------------------------------- #
 
 HELP_SECTIONS = [
-    ("檢查 / 系統資訊", [
-        ("check", "檢查各來源工具是否可用 (執行前先確認)"),
-        ("netinfo [iface] [--all] [--refresh]", "本機網路設定: DHCP/靜態, IP/遮罩, 閘道, 靜態路由, Sub IP"),
-        ("net", "netinfo 的別名"),
-        ("refresh", "清除本次快取 (netinfo / check / ip 重新讀取)"),
-    ]),
-    ("綜合", [
-        ("all", "全部來源 + ping + 外網 IP, 最後給統整報告"),
-        ("", "選項: --sources a,b,c  --no-ping  --no-ip  --seconds N"),
-    ]),
-    ("單一測速來源", [
-        ("mlab", "M-Lab NDT7 (開放學術, ISP 最難優待)"),
-        ("fast [--upload]", "fast.com / Netflix CDN"),
-        ("cloudflare [--seconds N]", "Cloudflare (純 Python, 不需外部工具)"),
-        ("ookla", "Ookla speedtest.net 官方 CLI"),
-        ("libre", "LibreSpeed"),
+    ("測速", [
+        ("speed all", "全部來源 + ping + 外網 IP, 最後給統整報告"),
+        ("speed mlab|fast|cloudflare|ookla|libre", "單一來源測速"),
+        ("", "例: speed cloudflare --seconds 15    speed fast --upload"),
     ]),
     ("Ping", [
         ("ping [targets...]", "對目標 ping (預設含 default gateway + 清單)"),
         ("", "選項: -c/--count  -i/--interval  -W/--timeout  -s/--size  --method auto|icmp|system  --no-gateway"),
     ]),
-    ("外網 IP / 電信商", [
-        ("ip", "查外網 IP 與所屬電信商 (多來源備援)"),
+    ("顯示資訊 (show)", [
+        ("show ip", "外網 IP 與電信商"),
+        ("show net", "本機網路設定: DHCP/靜態, IP/遮罩, 閘道, 靜態路由, Sub IP"),
+        ("show tools", "檢查各來源工具是否可用 (含下載網址)"),
+        ("show config|targets|endpoints|theme|history|version", "各項目前狀態"),
+        ("netinfo [iface] [--all] [-i] [--refresh]", "等同 show net (netinfo 直接可用)"),
     ]),
-    ("對測 (兩端對開)", [
+    ("對測 (pair)", [
         ("pair serve", "開對測伺服器 (優先 iperf3, 否則內建)"),
-        ("", "選項: --host --port --method auto|iperf3|builtin --iperf-path"),
-        ("pair client <host>", "連到對測端 (下載/上傳/雙向)"),
-        ("", "選項: --port --mode both|down|up --duration --streams --iperf-path"),
+        ("pair client <host>", "連到對測端 (--mode both|down|up --duration --streams)"),
         ("pair history", "看對測歷史"),
     ]),
-    ("歷史紀錄 / 設定", [
-        ("history", "列出歷史, 可輸入編號直接重跑"),
-        ("targets [list|add|del|set|gateway]", "ping 目標清單"),
-        ("endpoints [list|set <來源> <值>]", "測速端點設定"),
-        ("config [show|path|edit|reset|export|import]", "設定檔 (可匯出/匯入分享)"),
-        ("theme [list|set|reset|preset|export|import]", "顏色主題 (可自訂/匯出/匯入分享)"),
-        ("set <key> <value>", "例: set iperf.path /usr/local/bin/iperf3"),
-        ("get <key>", "讀取設定值"),
+    ("設定 (config)", [
+        ("config show|path|edit|reset|export|import", "設定檔 (可匯出/匯入分享)"),
+        ("config set <key> <value>", "例: config set iperf.path /usr/local/bin/iperf3"),
+        ("config get <key>", "讀取設定值"),
+        ("config targets [list|add|del|set|gateway]", "ping 目標清單"),
+        ("config endpoints [list|set <來源> <值>]", "測速端點設定"),
+        ("config theme [list|set|reset|preset|export|import]", "顏色主題 (可自訂/匯出/匯入分享)"),
+        ("history", "歷史紀錄, 可輸入編號直接重跑"),
     ]),
-    ("Cisco 風格 (console)", [
-        ("show <項目>", "show config/ip/interfaces/tools/targets/endpoints/theme/history/version"),
-        ("configure (或 conf)", "進入設定模式 (提示字元變 netspeed(config)#)"),
-        ("set / no / endpoints / targets / theme", "設定模式內可用; 即時套用, 需 write 才存檔"),
-        ("write (或 save)", "將設定寫入檔案 (否則下次執行仍為舊設定)"),
-        ("end (或 exit)", "離開設定模式"),
+    ("互動模式 (Cisco 風格)", [
+        ("console", "進入互動模式 (shell 亦可; 不帶參數也會倒數後跑預設)"),
+        ("show / configure / write / end", "console 內: show <x>, configure 進設定模式, write 存檔"),
+        ("refresh", "console 內: 清除本次快取 (netinfo / check / ip)"),
     ]),
-    ("版本 / 更新", [
+    ("版本 / 安裝", [
         ("update [--reset-skip]", "檢查/更新到最新版本 (來源: update.repo)"),
         ("version", "顯示版本"),
-    ]),
-    ("安裝 / 移除", [
-        ("install [-y]", "安裝到使用者目錄並加入 PATH (產生 netspeed 指令)"),
-        ("uninstall [--purge] [-y]", "移除程式 (--purge 同時刪除設定與歷史)"),
+        ("install [-y] | uninstall [--purge] [-y]", "安裝 / 移除"),
     ]),
 ]
 
 COMMAND_ORDER = [
-    "all", "mlab", "fast", "cloudflare", "ookla", "libre", "ping", "ip",
-    "check", "netinfo", "net", "pair", "history", "show", "configure",
-    "config", "set", "no", "get", "targets", "endpoints", "theme",
-    "update", "version", "install", "uninstall", "write", "help", "refresh", "exit",
+    "speed", "ping", "show", "pair", "config", "netinfo",
+    "update", "console", "install", "uninstall", "help", "refresh", "exit",
+    "configure", "write", "no", "end",
 ]
 
 COMMAND_HELP = {
+    "speed": "測速 (all/mlab/fast/cloudflare/ookla/libre)",
     "all": "全部來源 + ping + 外網 IP 統整報告",
     "mlab": "M-Lab NDT7 測速",
     "fast": "fast.com (Netflix) 測速",
@@ -2570,7 +2585,6 @@ COMMAND_HELP = {
     "ip": "查外網 IP 與電信商",
     "check": "檢查各來源工具是否可用",
     "netinfo": "顯示本機網路設定",
-    "net": "netinfo 的別名",
     "pair": "對測 (serve / client / history)",
     "history": "歷史紀錄, 可選取重跑",
     "config": "設定檔 (show/path/edit/reset)",
@@ -2581,6 +2595,7 @@ COMMAND_HELP = {
     "theme": "顏色主題 (可自訂/匯出/匯入)",
     "update": "檢查 / 更新版本",
     "version": "顯示版本",
+    "console": "進入互動模式 (shell 亦可)",
     "install": "安裝並加入 PATH",
     "uninstall": "移除程式",
     "help": "顯示完整說明",
@@ -2634,25 +2649,29 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-color", action="store_true", help="關閉顏色")
     p.add_argument("--config", metavar="PATH", help="指定設定檔路徑")
     p.add_argument("--version", action="version", version=f"netspeed {VERSION}")
-    sub = p.add_subparsers(dest="cmd")
+    sub = p.add_subparsers(dest="cmd", metavar="<command>")
 
-    sp = sub.add_parser("all", parents=[common], help="全部來源 + ping + 外網 IP")
-    sp.add_argument("--sources", help="要跑的來源, 逗號分隔")
-    sp.add_argument("--no-ping", action="store_true")
-    sp.add_argument("--no-ip", action="store_true")
-    sp.add_argument("--seconds", type=float, default=None)
-
+    # 測速分層: speed <all|mlab|fast|cloudflare|ookla|libre>
+    speed = sub.add_parser("speed", help="測速 (all / mlab / fast / cloudflare / ookla / libre)")
+    speed_sub = speed.add_subparsers(dest="speed_cmd")
+    s_all = speed_sub.add_parser("all", parents=[common], help="全部來源 + ping + 外網 IP")
+    s_all.add_argument("--sources", help="要跑的來源, 逗號分隔")
+    s_all.add_argument("--no-ping", action="store_true")
+    s_all.add_argument("--no-ip", action="store_true")
+    s_all.add_argument("--seconds", type=float, default=None)
     for name, hlp in [
         ("mlab", "M-Lab NDT7"), ("fast", "fast.com (Netflix)"),
         ("cloudflare", "Cloudflare"), ("ookla", "Ookla speedtest.net"),
         ("libre", "LibreSpeed"),
     ]:
-        s = sub.add_parser(name, parents=[common], help=hlp)
+        s = speed_sub.add_parser(name, parents=[common], help=hlp)
         s.add_argument("args", nargs="*", help="透傳參數")
         if name == "fast":
             s.add_argument("--upload", action="store_true")
         if name == "cloudflare":
             s.add_argument("--seconds", type=float, default=None)
+
+
 
     pp = sub.add_parser("ping", parents=[common], help="對目標 ping")
     pp.add_argument("targets", nargs="*")
@@ -2669,9 +2688,10 @@ def build_parser() -> argparse.ArgumentParser:
     ck = sub.add_parser("check", parents=[common], help="檢查各來源工具是否可用")
     ck.add_argument("--refresh", action="store_true", help="重新檢查 (不讀快取)")
 
-    ni = sub.add_parser("netinfo", parents=[common], aliases=["net"], help="顯示本機網路設定")
+    ni = sub.add_parser("netinfo", parents=[common], help="顯示本機網路設定")
     ni.add_argument("interface", nargs="?", help="指定要顯示的介面名稱")
     ni.add_argument("--all", action="store_true", help="顯示所有介面")
+    ni.add_argument("-i", "--select", action="store_true", help="互動選單選擇介面")
     ni.add_argument("--refresh", action="store_true", help="重新讀取 (不讀快取)")
 
     pair = sub.add_parser("pair", help="對測 (iperf3 或內建)")
@@ -2697,29 +2717,45 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--limit", type=int, default=20)
     ph.add_argument("--run", type=int)
 
-    cf = sub.add_parser("config", parents=[common], help="設定檔")
-    cf.add_argument("action", nargs="?", default="show",
-                    choices=["show", "path", "edit", "reset", "export", "import"])
-    cf.add_argument("values", nargs="*")
+    # 設定分層: config <show|set|get|targets|endpoints|theme|path|edit|reset|export|import>
+    cf = sub.add_parser("config", help="設定 (show/set/get/targets/endpoints/theme/...)")
+    cf_sub = cf.add_subparsers(dest="cfg_cmd")
+    for nm in ("show", "path", "edit", "reset"):
+        cf_sub.add_parser(nm, parents=[common])
+    _cfe = cf_sub.add_parser("export", parents=[common]); _cfe.add_argument("path", nargs="?")
+    _cfi = cf_sub.add_parser("import", parents=[common]); _cfi.add_argument("path")
+    _cfs = cf_sub.add_parser("set", parents=[common]); _cfs.add_argument("key"); _cfs.add_argument("value")
+    _cfg = cf_sub.add_parser("get", parents=[common]); _cfg.add_argument("key")
+    _cft = cf_sub.add_parser("targets", parents=[common])
+    _cft.add_argument("action", nargs="?", default="list", choices=["list", "add", "del", "set", "gateway"])
+    _cft.add_argument("values", nargs="*")
+    _cfn = cf_sub.add_parser("endpoints", parents=[common])
+    _cfn.add_argument("action", nargs="?", default="list", choices=["list", "set"])
+    _cfn.add_argument("values", nargs="*")
+    _cfh = cf_sub.add_parser("theme", parents=[common])
+    _cfh.add_argument("action", nargs="?", default="list",
+                      choices=["list", "set", "reset", "preset", "export", "import"])
+    _cfh.add_argument("values", nargs="*")
 
-    th = sub.add_parser("theme", parents=[common], help="顏色主題")
+    # 平鋪設定指令 (隱藏, 仍可用)
+    th = sub.add_parser("theme", parents=[common], help=argparse.SUPPRESS)
     th.add_argument("action", nargs="?", default="list",
                     choices=["list", "set", "reset", "preset", "export", "import"])
     th.add_argument("values", nargs="*")
 
-    st = sub.add_parser("set", parents=[common], help="設定值 (dotted key)")
+    st = sub.add_parser("set", parents=[common], help=argparse.SUPPRESS)
     st.add_argument("key")
     st.add_argument("value")
 
-    gt = sub.add_parser("get", parents=[common], help="讀取設定值")
+    gt = sub.add_parser("get", parents=[common], help=argparse.SUPPRESS)
     gt.add_argument("key")
 
-    pt = sub.add_parser("targets", parents=[common], help="ping 目標清單")
+    pt = sub.add_parser("targets", parents=[common], help=argparse.SUPPRESS)
     pt.add_argument("action", nargs="?", default="list",
                     choices=["list", "add", "del", "set", "gateway"])
     pt.add_argument("values", nargs="*")
 
-    pe = sub.add_parser("endpoints", parents=[common], help="測速端點設定")
+    pe = sub.add_parser("endpoints", parents=[common], help=argparse.SUPPRESS)
     pe.add_argument("action", nargs="?", default="list", choices=["list", "set"])
     pe.add_argument("values", nargs="*")
 
@@ -2736,9 +2772,43 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("version", parents=[common], help="顯示版本")
 
+    sub.add_parser("console", parents=[common], aliases=["shell"], help="進入互動模式")
+
     sub.add_parser("help", help="顯示完整說明")
 
+    # Python 3.13 的 argparse 對 subparser 的 help=SUPPRESS 無效, 手動移除隱藏項
+    for action in list(getattr(sub, "_choices_actions", [])):
+        if action.help == argparse.SUPPRESS:
+            sub._choices_actions.remove(action)
+
     return p
+
+
+def _dispatch_config(cfg: dict, args) -> None:
+    sub = getattr(args, "cfg_cmd", None) or "show"
+    ns = dict(json=getattr(args, "json", False), no_save=getattr(args, "no_save", False),
+              config=getattr(args, "config", None), no_color=getattr(args, "no_color", False))
+    if sub in ("show", "path", "edit", "reset"):
+        cmd_config(cfg, argparse.Namespace(action=sub, values=[], **ns))
+    elif sub == "export":
+        path = getattr(args, "path", None)
+        cmd_config(cfg, argparse.Namespace(action="export", values=([path] if path else []), **ns))
+    elif sub == "import":
+        cmd_config(cfg, argparse.Namespace(action="import", values=[args.path], **ns))
+    elif sub == "set":
+        set_dotted(cfg, args.key, coerce(args.value))
+        save_config(cfg, getattr(args, "config", None))
+        ok(f"已設定 {args.key} = {get_dotted(cfg, args.key)}")
+    elif sub == "get":
+        print(json.dumps(get_dotted(cfg, args.key), ensure_ascii=False))
+    elif sub == "targets":
+        cmd_targets(cfg, argparse.Namespace(action=args.action, values=args.values))
+    elif sub == "endpoints":
+        cmd_endpoints(cfg, argparse.Namespace(action=args.action, values=args.values))
+    elif sub == "theme":
+        cmd_theme(cfg, argparse.Namespace(action=args.action, values=args.values, **ns))
+    else:
+        warn(f"未知 config 子指令: {sub}")
 
 
 def _dispatch(args, cfg: dict, parser) -> None:
@@ -2747,13 +2817,21 @@ def _dispatch(args, cfg: dict, parser) -> None:
         cmd_all(cfg, args)
     elif cmd in ("mlab", "fast", "cloudflare", "ookla", "libre"):
         cmd_source(cmd, cfg, args)
+    elif cmd == "speed":
+        sc = getattr(args, "speed_cmd", None)
+        if sc == "all":
+            cmd_all(cfg, args)
+        elif sc in ("mlab", "fast", "cloudflare", "ookla", "libre"):
+            cmd_source(sc, cfg, args)
+        else:
+            parser.parse_args(["speed", "--help"])
     elif cmd == "ping":
         cmd_ping(cfg, args)
     elif cmd == "ip":
         cmd_ip(cfg, args)
     elif cmd == "check":
         cmd_check(cfg, args)
-    elif cmd in ("netinfo", "net"):
+    elif cmd == "netinfo":
         cmd_netinfo(cfg, args)
     elif cmd == "pair":
         if args.pair_cmd == "serve":
@@ -2768,7 +2846,7 @@ def _dispatch(args, cfg: dict, parser) -> None:
     elif cmd == "history":
         cmd_history(cfg, args)
     elif cmd == "config":
-        cmd_config(cfg, args)
+        _dispatch_config(cfg, args)
     elif cmd == "set":
         set_dotted(cfg, args.key, coerce(args.value))
         save_config(cfg, getattr(args, "config", None))
@@ -2792,6 +2870,8 @@ def _dispatch(args, cfg: dict, parser) -> None:
         cmd_update(cfg, args)
     elif cmd == "version":
         print(f"netspeed {VERSION}")
+    elif cmd in ("console", "shell"):
+        console()
     elif cmd == "help":
         print_help()
     else:
@@ -2801,6 +2881,8 @@ def _dispatch(args, cfg: dict, parser) -> None:
 def run_command(argv, cfg: dict | None = None) -> int:
     global USE_COLOR
     argv = list(argv)
+    if argv and argv[0].lower() in ALIAS_MAP:
+        argv = ALIAS_MAP[argv[0].lower()] + argv[1:]
     if argv and argv[0].lower() == "show":
         mapped = _resolve_show(argv[1:])
         if mapped is None:
@@ -2844,8 +2926,8 @@ def run_command(argv, cfg: dict | None = None) -> int:
 COMMANDS = {
     "all", "mlab", "fast", "cloudflare", "ookla", "libre", "ping", "ip",
     "pair", "history", "config", "set", "get", "targets", "endpoints", "theme",
-    "check", "netinfo", "net", "update", "version", "install", "uninstall",
-    "help", "refresh",
+    "check", "netinfo", "update", "version", "install", "uninstall",
+    "console", "shell", "help", "refresh", "speed",
     # Cisco 風格 (由 console / run_command 前置處理)
     "show", "configure", "conf", "write", "save", "no", "end",
 }
@@ -2854,7 +2936,8 @@ COMMANDS = {
 SHOW_MAP = {
     "config": ["config"],
     "running-config": ["config"],
-    "ip": ["netinfo"],
+    "ip": ["ip"],
+    "net": ["netinfo"],
     "interfaces": ["netinfo"],
     "tools": ["check"],
     "targets": ["targets"],
@@ -2862,7 +2945,17 @@ SHOW_MAP = {
     "theme": ["theme"],
     "history": ["history"],
     "version": ["version"],
-    "speed": ["all"],
+    "speed": ["speed", "all"],
+}
+
+# 平鋪別名 -> 分層指令 (仍可用, 但不列在 help)
+ALIAS_MAP = {
+    "all": ["speed", "all"],
+    "mlab": ["speed", "mlab"],
+    "fast": ["speed", "fast"],
+    "cloudflare": ["speed", "cloudflare"],
+    "ookla": ["speed", "ookla"],
+    "libre": ["speed", "libre"],
 }
 
 
@@ -2891,7 +2984,8 @@ ARG_CANDIDATES = {
     "pair": ["serve", "client", "history"],
     "targets": ["list", "add", "del", "set", "gateway"],
     "endpoints": ["list", "set"],
-    "config": ["show", "path", "edit", "reset", "export", "import"],
+    "config": ["show", "set", "get", "targets", "endpoints", "theme",
+               "path", "edit", "reset", "export", "import"],
     "theme": ["list", "set", "reset", "preset", "export", "import"],
     "history": ["--kind", "--limit", "--run"],
     "update": ["--reset-skip"],
@@ -2902,6 +2996,7 @@ ARG_CANDIDATES = {
     "install": ["--no-path", "-y"],
     "uninstall": ["--purge", "--no-path", "-y"],
     "show": list(SHOW_MAP.keys()),
+    "speed": ["all", "mlab", "fast", "cloudflare", "ookla", "libre"],
 }
 
 PAIR_OPTS = {
@@ -2959,8 +3054,8 @@ def _ping_candidates() -> list:
 
 def _arg_candidates(cmd: str, completed: list) -> list:
     cmd = cmd.lower()
-    if cmd in ("netinfo", "net"):
-        opts = ["--all", "--refresh", "--json"]
+    if cmd == "netinfo":
+        opts = ["--all", "--select", "--refresh", "--json"]
         if not completed or completed[0].startswith("-"):
             return _netinfo_ifaces() + opts
         return opts
@@ -3251,7 +3346,7 @@ def _config_mode_cmd(tokens: list, cfg: dict, state: dict):
         _dispatch(sub, cfg, sub_parser)
         state["dirty"] = True
         return None
-    if cmd in ("show", "get", "check", "netinfo", "net", "ip", "version"):
+    if cmd in ("show", "get", "check", "netinfo", "ip", "version"):
         run_command(tokens, cfg)
         return None
     if cmd == "help":
@@ -3363,6 +3458,37 @@ def _enable_windows_ansi() -> None:
         pass
 
 
+def run_default_with_countdown(seconds: int = 5) -> int:
+    cfg = load_config()
+    apply_theme(cfg)
+    try:
+        check_update(cfg, interactive=True)
+    except Exception:
+        pass
+    sources = cfg.get("sources", DEFAULT_CONFIG["sources"])
+    section("預設測速")
+    print("  將以預設設定執行:")
+    print("    外網 IP / 電信商 + Ping + 測速來源: "
+          + ", ".join(SOURCE_LABELS.get(s, s) for s in sources))
+    print(tcol("  (按 Ctrl+C 可取消並進入互動模式)", "dim"))
+    print()
+    try:
+        for i in range(seconds, 0, -1):
+            sys.stdout.write(f"\r  倒數 {i} 秒... ")
+            sys.stdout.flush()
+            time.sleep(1)
+        sys.stdout.write("\r" + " " * 20 + "\r")
+        sys.stdout.flush()
+    except KeyboardInterrupt:
+        print("\n已取消, 進入互動模式。")
+        return console()
+    args = argparse.Namespace(sources=None, no_ping=False, no_ip=False, seconds=None,
+                              json=False, no_color=False, config=None, no_save=False,
+                              no_update_check=True)
+    cmd_all(cfg, args)
+    return 0
+
+
 def main(argv=None) -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -3383,7 +3509,7 @@ def main(argv=None) -> int:
         if not sys.stdin.isatty():
             print_help()
             return 0
-        return console()
+        return run_default_with_countdown()
     return run_command(argv)
 
 
