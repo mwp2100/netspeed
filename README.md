@@ -10,34 +10,43 @@
 - **Python 3.8+**（已內建於多數系統；Windows 可從 <https://www.python.org/downloads/> 安裝，
   安裝時勾選「Add Python to PATH」）。
 - 免安裝任何套件即可使用 **Cloudflare 測速、外網 IP/電信商、Ping**（皆為內建實作）。
-- 其餘測速來源為**選用**，用到時才需要對應的外部工具（見第 7 節）。
+- 其餘測速來源為**選用**，用到時才需要對應的外部工具（見第 8 節）。
 
 ---
 
-## 2. 快速執行（不需安裝）
+## 2. 一行下載並執行（最快）
 
-在程式所在資料夾直接執行：
+複製貼上就能跑（需要 Python 3）：
 
 ```bash
-# Windows
-netspeed.cmd all
-# 或
-python netspeed.py all
-
 # macOS / Linux
-./netspeed all
-# 或
-python3 netspeed.py all
+curl -fsSL https://raw.githubusercontent.com/mwp2100/netspeed/main/netspeed.py -o netspeed.py && python3 netspeed.py
+
+# Windows PowerShell
+irm https://raw.githubusercontent.com/mwp2100/netspeed/main/netspeed.py -OutFile netspeed.py; python netspeed.py
 ```
 
-**不帶參數**會先顯示「將以預設設定執行」並**倒數**，倒數完就跑預設測速（外網 IP + Ping + 全部來源）；倒數中按 `Ctrl+C` 會取消並進入互動模式。
+跑完想留下來長期用，就執行安裝（見第 4 節）：`python3 netspeed.py install`。
+
+---
+
+## 3. 執行方式
 
 ```bash
-python netspeed.py            # 倒數 5 秒 → 跑預設測速
-python netspeed.py console    # 直接進入互動 console（shell 亦可）
+python netspeed.py            # 不帶參數 → 倒數後跑預設測速
+python netspeed.py console    # 進入互動 console（shell 亦可）
+python netspeed.py speed all  # 帶參數 → 直接執行該指令
 ```
 
-互動 console（類似 `diskpart`），輸入 `help` 看指令、`exit` 離開：
+**不帶參數**會先顯示「將以預設設定執行」並**倒數 5 秒**；倒數中：
+
+- 按 `c` → 進入互動 console
+- 按**其他任一鍵** → 取消
+- 不按鍵 → 倒數結束後跑預設測速（外網 IP + Ping + 全部來源）
+
+**帶參數**則直接執行該指令（cli 模式），例如 `netspeed speed cloudflare --seconds 15`。
+
+互動 console 輸入 `help` 看指令、`exit` 離開：
 
 ```bash
 # netspeed> help
@@ -46,7 +55,7 @@ python netspeed.py console    # 直接進入互動 console（shell 亦可）
 # netspeed> exit
 ```
 
-輸入時的輔助（像 diskpart 一樣）：
+輸入時的輔助：
 
 - 打 `sh` 再按 `?` → 列出 `show`；打 `s` 會列出 `speed`、`show`。
 - 接著打 `o`（變成 `sho`）按 `Tab` → 自動補成 `show`。
@@ -60,7 +69,7 @@ python netspeed.py console    # 直接進入互動 console（shell 亦可）
 
 ---
 
-## 3. 安裝（建議，會產生 `netspeed` 指令）
+## 4. 安裝（建議，會產生 `netspeed` 指令）
 
 一行指令即可安裝到使用者目錄、建立啟動器並加入 PATH：
 
@@ -87,11 +96,11 @@ netspeed pair client 192.168.1.20
 | Windows | `%LOCALAPPDATA%\Programs\netspeed\netspeed.py` | 同目錄 `netspeed.cmd` | 加入「使用者」PATH（不影響系統 PATH） |
 | macOS / Linux | `~/.local/share/netspeed/netspeed.py` | `~/.local/bin/netspeed` | 於 shell 設定檔加入 `~/.local/bin` |
 
-> 設定與歷史紀錄存放於使用者設定目錄（見第 6 節）。
+> 設定與歷史紀錄存放於使用者設定目錄（見第 7 節）。
 
 ---
 
-## 4. 移除
+## 5. 移除
 
 ```bash
 # Windows
@@ -114,11 +123,11 @@ python3 netspeed.py uninstall --purge    # macOS / Linux
   「設定 → 系統 → 進階系統設定 → 環境變數」把該目錄從使用者 PATH 移除。
 - macOS / Linux：`rm -rf ~/.local/share/netspeed ~/.local/bin/netspeed`，
   並移除 shell 設定檔中 `# added by netspeed` 那兩行。
-- 設定/歷史：刪除第 6 節所列的資料夾。
+- 設定/歷史：刪除第 7 節所列的資料夾。
 
 ---
 
-## 5. 指令總覽
+## 6. 指令總覽
 
 指令採分層（top-level 精簡）：
 
@@ -128,7 +137,8 @@ netspeed console                進入互動模式（shell 亦可）
 
 netspeed speed all              測速：全部來源 → 統整報告
 netspeed speed mlab|fast|cloudflare|ookla|libre
-netspeed ping [目標...]         預設含 default gateway 與清單
+netspeed ping [目標...]         直接 ping（標頭會顯示目前參數）
+netspeed ping                   不帶目標時進入互動選單（見下）
 
 netspeed show ip                外網 IP 與電信商
 netspeed show net               本機網路設定（DHCP/靜態、IP/遮罩、閘道、靜態路由、Sub IP）
@@ -164,6 +174,33 @@ netspeed> configure             進入設定模式（提示字元變 netspeed(co
 
 常用選項：`--json`、`--no-color`、`--no-save`、`--config <path>`、`--no-update-check`。
 
+### Ping 標頭與互動選單
+
+直接 `ping` 時，標頭會帶出目前使用的參數：
+
+```
+================================================================
+  Ping 測試 count:5 interval:1.0 timeout:2.0 size:56
+================================================================
+```
+
+不帶目標（且為互動終端）時會進入選單：
+
+```
+    [1] 全部目標
+    [2] 選擇單一目標        # 再進一層列出目標供選擇
+    [3] 修改設定            # 再進一層
+    [Enter/q] 取消
+```
+
+`[3] 修改設定` 內可調整（與 `config` 編輯同一套設定，改完即存檔）：
+
+```
+    [1] 預設閘道自動加入: on/off
+    [2] 目標清單 (3 個)     # 可新增 / 刪除目標
+    [3] 參數                # count / interval / timeout / size / method
+```
+
 ### 範例
 
 ```bash
@@ -182,7 +219,7 @@ netspeed history --kind pair
 
 ---
 
-## 6. 設定與歷史紀錄位置
+## 7. 設定與歷史紀錄位置
 
 可用環境變數 `NETSPEED_CONFIG_DIR` 覆寫。
 
@@ -199,7 +236,7 @@ netspeed history --kind pair
 
 ---
 
-## 7. 選用外部工具（用到該來源才需要）
+## 8. 選用外部工具（用到該來源才需要）
 
 | 來源 | 需要 | 安裝方式 |
 |------|------|----------|
@@ -223,7 +260,7 @@ netspeed history --kind pair
 
 ---
 
-## 8. 版本更新（GitHub）
+## 9. 版本更新（GitHub）
 
 程式執行時（含進入 console 時）會依設定檢查 GitHub Releases 是否有新版本；有新版會顯示更新內容，並詢問：
 
@@ -246,7 +283,7 @@ netspeed set update.interval_hours 24      # 檢查頻率（小時）
 
 ---
 
-## 9. Cisco 風格設定模式（console）
+## 10. Cisco 風格設定模式（console）
 
 在 console 內可用 Cisco 交換器習慣的指令：
 
@@ -275,7 +312,7 @@ netspeed(config)# end                  # 離開（或 exit）
 
 ---
 
-## 10. 顏色主題（theme）
+## 11. 顏色主題（theme）
 
 可自訂各元素的顏色，存檔後下次執行即生效，也能匯出分享：
 
@@ -295,7 +332,7 @@ netspeed theme import my-theme.json     # 匯入他人主題
 
 ---
 
-## 11. 疑難排解
+## 12. 疑難排解
 
 - **`netspeed` 找不到**：安裝後請重開終端機（PATH 變更需重新載入）。
 - **Ping 顯示「無回應」**：ICMP 需要權限；無權限時會自動退回系統 `ping`。可用

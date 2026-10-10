@@ -41,7 +41,7 @@ import threading
 import time
 import urllib.request
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 APP = "netspeed"
 PROTO_TAG = "NETSPEED1"
 
@@ -1260,25 +1260,33 @@ def cmd_ip(cfg: dict, args) -> dict:
     return ipinfo
 
 
-def cmd_ping(cfg: dict, args) -> list:
+def _ping_effective(cfg: dict, args) -> dict:
+    pc = cfg.get("ping", {})
+    return {
+        "count": getattr(args, "count", None) or pc.get("count", 5),
+        "interval": getattr(args, "interval", None) or pc.get("interval", 1.0),
+        "timeout": getattr(args, "timeout", None) or pc.get("timeout", 2.0),
+        "size": getattr(args, "size", None) or pc.get("size", 56),
+        "method": getattr(args, "method", None) or pc.get("method", "auto"),
+    }
+
+
+def _do_ping(cfg: dict, args, targets: list) -> list:
     use_json = getattr(args, "json", False)
     no_save = getattr(args, "no_save", False)
-    extra = getattr(args, "targets", None) or []
-    targets = resolve_ping_targets(cfg, extra,
-                                   use_gateway=not getattr(args, "no_gateway", False),
-                                   include_config=not getattr(args, "only", False))
+    eff = _ping_effective(cfg, args)
     if not targets:
         error("沒有可 ping 的目標")
         return []
     if not use_json:
-        section("Ping 測試")
+        section(f"Ping 測試 count:{eff['count']} interval:{eff['interval']} "
+                f"timeout:{eff['timeout']} size:{eff['size']}")
     results = []
     for t in targets:
         if not use_json:
             print(f"  正在 ping {col(t, 'bold')} ...")
-        r = ping_target(t, cfg, getattr(args, "count", None), getattr(args, "interval", None),
-                        getattr(args, "timeout", None), getattr(args, "size", None),
-                        getattr(args, "method", None))
+        r = ping_target(t, cfg, eff["count"], eff["interval"], eff["timeout"],
+                        eff["size"], eff["method"])
         results.append(r)
         if not use_json:
             loss = r.get("loss")
@@ -1297,6 +1305,166 @@ def cmd_ping(cfg: dict, args) -> list:
         print()
         print_ping_table(results)
     return results
+
+
+def _ping_pick_target(targets: list):
+    if not targets:
+        warn("沒有目標")
+        return None
+    print("  選擇目標:")
+    for i, t in enumerate(targets, 1):
+        print(f"    [{i}] {t}")
+    print(tcol("    [Enter/q] 返回", "dim"))
+    try:
+        choice = input(col("  請輸入: ", "bold")).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
+    if choice.isdigit() and 1 <= int(choice) <= len(targets):
+        return targets[int(choice) - 1]
+    return None
+
+
+def _ping_params_menu(cfg: dict) -> None:
+    params = [("count", "次數"), ("interval", "間隔(秒)"), ("timeout", "逾時(秒)"),
+              ("size", "封包大小"), ("method", "auto|icmp|system")]
+    while True:
+        pc = cfg.get("ping", {})
+        print()
+        print(tcol("  Ping 參數:", "heading"))
+        for i, (k, desc) in enumerate(params, 1):
+            print(f"    [{i}] {k} = {pc.get(k)}   ({desc})")
+        print(tcol("    [Enter/q] 返回", "dim"))
+        try:
+            choice = input(col("  請輸入: ", "bold")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if choice in ("", "q", "quit", "exit"):
+            return
+        if choice.isdigit() and 1 <= int(choice) <= len(params):
+            key = params[int(choice) - 1][0]
+            try:
+                val = input(f"  {key} 新值: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                continue
+            if val:
+                set_dotted(cfg, f"ping.{key}", coerce(val))
+                save_config(cfg)
+                ok(f"ping.{key} = {get_dotted(cfg, f'ping.{key}')}")
+        else:
+            warn("無效的選擇")
+
+
+def _ping_targets_menu(cfg: dict) -> None:
+    while True:
+        targets = cfg.setdefault("ping", {}).setdefault("targets", [])
+        print()
+        print(tcol("  Ping 目標清單:", "heading"))
+        for i, t in enumerate(targets, 1):
+            print(f"    [{i}] {t}")
+        print(tcol("    [a] 新增   [d] 刪除   [Enter/q] 返回", "dim"))
+        try:
+            choice = input(col("  請輸入: ", "bold")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if choice in ("", "q", "quit", "exit"):
+            return
+        if choice == "a":
+            try:
+                t = input("  新增目標 (IP/主機): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                continue
+            if t:
+                if t not in targets:
+                    targets.append(t)
+                save_config(cfg)
+                ok(f"已新增 {t}")
+        elif choice == "d":
+            try:
+                n = input("  刪除編號: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                continue
+            if n.isdigit() and 1 <= int(n) <= len(targets):
+                removed = targets.pop(int(n) - 1)
+                save_config(cfg)
+                ok(f"已刪除 {removed}")
+        else:
+            warn("無效的選擇")
+
+
+def _ping_settings_menu(cfg: dict) -> None:
+    while True:
+        pc = cfg.get("ping", {})
+        print()
+        print(tcol("  修改 Ping 設定:", "heading"))
+        print(f"    [1] 預設閘道自動加入: {'on' if pc.get('auto_gateway', True) else 'off'}")
+        print(f"    [2] 目標清單 ({len(pc.get('targets', []))} 個)")
+        print("    [3] 參數 (count / interval / timeout / size / method)")
+        print(tcol("    [Enter/q] 返回", "dim"))
+        try:
+            choice = input(col("  請輸入: ", "bold")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if choice in ("", "q", "quit", "exit"):
+            return
+        if choice == "1":
+            set_dotted(cfg, "ping.auto_gateway", not pc.get("auto_gateway", True))
+            save_config(cfg)
+            ok(f"ping.auto_gateway = {get_dotted(cfg, 'ping.auto_gateway')}")
+        elif choice == "2":
+            _ping_targets_menu(cfg)
+        elif choice == "3":
+            _ping_params_menu(cfg)
+        else:
+            warn("無效的選擇")
+
+
+def _ping_menu(cfg: dict, args) -> list:
+    while True:
+        eff = _ping_effective(cfg, args)
+        print()
+        section(f"Ping 測試 count:{eff['count']} interval:{eff['interval']} "
+                f"timeout:{eff['timeout']} size:{eff['size']}")
+        print("    [1] 全部目標")
+        print("    [2] 選擇單一目標")
+        print("    [3] 修改設定")
+        print(tcol("    [Enter/q] 取消", "dim"))
+        try:
+            choice = input(col("  請輸入: ", "bold")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return []
+        if choice in ("", "q", "quit", "exit"):
+            return []
+        if choice == "1":
+            targets = resolve_ping_targets(cfg, [], use_gateway=not getattr(args, "no_gateway", False))
+            return _do_ping(cfg, args, targets)
+        if choice == "2":
+            targets = resolve_ping_targets(cfg, [], use_gateway=not getattr(args, "no_gateway", False))
+            picked = _ping_pick_target(targets)
+            if picked:
+                return _do_ping(cfg, args, [picked])
+        elif choice == "3":
+            _ping_settings_menu(cfg)
+        else:
+            warn("無效的選擇")
+
+
+def cmd_ping(cfg: dict, args) -> list:
+    extra = getattr(args, "targets", None) or []
+    if extra or getattr(args, "only", False) or getattr(args, "json", False) \
+            or not sys.stdin.isatty():
+        targets = resolve_ping_targets(cfg, extra,
+                                       use_gateway=not getattr(args, "no_gateway", False),
+                                       include_config=not getattr(args, "only", False))
+        return _do_ping(cfg, args, targets)
+    return _ping_menu(cfg, args)
 
 
 def cmd_source(name: str, cfg: dict, args) -> dict:
@@ -1332,7 +1500,7 @@ def cmd_all(cfg: dict, args) -> dict:
         if not args.json:
             print_ip_section(ipinfo)
     if not args.no_ping:
-        collected["ping"] = cmd_ping(cfg, args)
+        collected["ping"] = _do_ping(cfg, args, resolve_ping_targets(cfg, []))
 
     for name in sources:
         try:
@@ -3458,6 +3626,62 @@ def _enable_windows_ansi() -> None:
         pass
 
 
+def _countdown_wait(seconds: int) -> str:
+    """倒數等待; 回傳 'run' | 'console' | 'cancel'。"""
+    def _decide(ch: str) -> str:
+        if ch in ("\x03",):
+            return "console"
+        if ch.lower() == "c":
+            return "console"
+        if ch in ("\r", "\n"):
+            return "run"
+        return "cancel"
+
+    if os.name == "nt":
+        import msvcrt
+        for i in range(seconds, 0, -1):
+            sys.stdout.write(f"\r  倒數 {i} 秒... ")
+            sys.stdout.flush()
+            end = time.time() + 1
+            while time.time() < end:
+                if msvcrt.kbhit():
+                    ch = msvcrt.getwch()
+                    if ch in ("\x00", "\xe0"):
+                        msvcrt.getwch()
+                        return "cancel"
+                    return _decide(ch)
+                time.sleep(0.05)
+        sys.stdout.write("\r" + " " * 24 + "\r")
+        sys.stdout.flush()
+        return "run"
+
+    import select
+    import termios
+    import tty
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        for i in range(seconds, 0, -1):
+            sys.stdout.write(f"\r  倒數 {i} 秒... ")
+            sys.stdout.flush()
+            end = time.time() + 1
+            while time.time() < end:
+                r, _, _ = select.select([fd], [], [], 0.05)
+                if r:
+                    ch = os.read(fd, 1).decode("utf-8", "replace")
+                    if ch == "\x1b":
+                        while select.select([fd], [], [], 0.01)[0]:
+                            os.read(fd, 1)
+                        return "cancel"
+                    return _decide(ch)
+        sys.stdout.write("\r" + " " * 24 + "\r")
+        sys.stdout.flush()
+        return "run"
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
 def run_default_with_countdown(seconds: int = 5) -> int:
     cfg = load_config()
     apply_theme(cfg)
@@ -3470,18 +3694,15 @@ def run_default_with_countdown(seconds: int = 5) -> int:
     print("  將以預設設定執行:")
     print("    外網 IP / 電信商 + Ping + 測速來源: "
           + ", ".join(SOURCE_LABELS.get(s, s) for s in sources))
-    print(tcol("  (按 Ctrl+C 可取消並進入互動模式)", "dim"))
+    print(tcol("  倒數中可按鍵: [c] 進入互動模式 / [其他鍵] 取消 / 不按鍵則倒數後執行", "dim"))
     print()
-    try:
-        for i in range(seconds, 0, -1):
-            sys.stdout.write(f"\r  倒數 {i} 秒... ")
-            sys.stdout.flush()
-            time.sleep(1)
-        sys.stdout.write("\r" + " " * 20 + "\r")
-        sys.stdout.flush()
-    except KeyboardInterrupt:
-        print("\n已取消, 進入互動模式。")
+    action = _countdown_wait(seconds)
+    if action == "console":
+        print("進入互動模式。")
         return console()
+    if action == "cancel":
+        print("已取消。")
+        return 0
     args = argparse.Namespace(sources=None, no_ping=False, no_ip=False, seconds=None,
                               json=False, no_color=False, config=None, no_save=False,
                               no_update_check=True)
