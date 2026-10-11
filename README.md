@@ -154,13 +154,14 @@ netspeed ping                   不帶目標時進入互動選單（見下）
 netspeed ip [-p provider]       外網 IP 與電信商（預設 ipinfo.io，可切換）
 netspeed show ping              Ping 設定（含目前 gateway 值）
 netspeed show tools             工具狀態（* = 執行 all 時會跑；分 ping / 測速 / 對測）
+netspeed show speed             測速工具檢查（等同 speed check）
 netspeed show env               環境狀態檢查（Python / 設定目錄 / 網際網路）
-netspeed show interfaces        本機網路設定（DHCP/IP/閘道/靜態路由/Sub IP）
+netspeed show interfaces        本機網路設定（DHCP/IP/閘道/Link Speed/靜態路由/Sub IP）
 netspeed show config|theme|history|version
 netspeed netinfo [介面] [--all] [-i] [--refresh]   等同 show interfaces
 
-netspeed pair serve             開對測伺服器（優先 iperf3，否則內建）
-netspeed pair client <host>     連到對測端（下載/上傳/雙向）
+netspeed pair serve             開對測伺服器（優先 iperf3，否則內建；支援 TCP/UDP）
+netspeed pair client <host>     連到對測端（下載/上傳/雙向；--udp 可測 UDP）
 netspeed pair history           對測歷史
 
 netspeed config show|path|edit|reset|export|import   設定檔（可匯出/匯入分享）
@@ -216,11 +217,27 @@ netspeed> configure             進入設定模式（提示字元變 netspeed(co
     [3] 參數                # count / interval / timeout / size / method
 ```
 
-### 測速工具檢查（speed check）
+### 測速工具檢查（speed check / show speed）
 
-`speed check` 會列出各測速來源的執行檔狀態，若有缺少，會詢問是否**協助自動下載**
-（GitHub Releases 類型會下載對應平台檔案到 netspeed 安裝目錄；fast.com 會嘗試 `npm install -g`；
-其餘則顯示官方下載網址）。按任一鍵即返回上層。加 `-y` 可略過詢問直接嘗試下載。
+`speed check`（或 `show speed`）會列出各測速來源的執行檔狀態，若有缺少，會詢問：
+
+- `y` = 協助**自動下載**（GitHub Releases 類型會下載對應平台檔案到 netspeed 安裝目錄；
+  fast.com 會嘗試 `npm install -g`；其餘顯示官方下載網址）
+- `h` = 顯示**如何下載**（各工具的安裝說明與網址）
+- 其他任一鍵 = 返回上層
+
+加 `-y` 可略過詢問直接嘗試下載。
+
+### 對測 UDP（pair --udp）
+
+`pair client` 加上 `--udp` 即可做 UDP 對測（iperf3 模式會帶 `-u`，可用 `-b` 指定目標頻寬，
+例如 `-b 100M`，`-b 0` 為不限；內建模式亦有內建 UDP 對測）。UDP 結果會多顯示 Jitter 與遺失率。
+伺服器端 `pair serve` 會同時監聽 TCP/UDP，不需額外設定。
+
+```bash
+netspeed pair serve                       # 同時監聽 TCP/UDP
+netspeed pair client 192.168.1.20 --udp --duration 10 -b 200M
+```
 
 ### 範例
 
@@ -318,6 +335,7 @@ netspeed set update.interval_hours 24      # 檢查頻率（小時）
 netspeed> show config          # = 原本的 config
 netspeed> show ping            # Ping 設定（含目前 gateway）
 netspeed> show tools           # 工具狀態（* = all 會執行）
+netspeed> show speed           # 測速工具檢查（= speed check）
 netspeed> show env             # 環境狀態檢查
 netspeed> show interfaces      # = netinfo
 netspeed> show conf            # 支援縮寫（唯一前綴）
@@ -338,8 +356,10 @@ netspeed(config)# end                  # 離開（或 exit）
 - 設定模式內變更**即時套用**（當下就生效），但**要 `write` 才會寫入檔案**；
   若沒 `write` 就 `end`，會提醒你「下次執行仍為舊設定」。
 - `show` 對應表：`config` → `config`，`ping` → Ping 設定，`tools` → 工具狀態，
-  `env` → 環境狀態，`interfaces` → `netinfo`，另有 `theme`、`history`、`version`。
+  `speed` → 測速工具檢查，`env` → 環境狀態，`interfaces` → `netinfo`，
+  另有 `theme`、`history`、`version`。
 - 直接下 `netspeed show config` 也可以（不必進 console）。
+- **已在 console 內時**：`help` 不會顯示 `console` 指令，輸入 `console` 也會被擋下（已在互動模式）。
 - 指令前綴會自動補齊：`sho` → `show`、`conf` → `configure`、`wr` → `write`、`in` → `install`。
 
 ---

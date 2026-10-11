@@ -45,7 +45,7 @@ import threading
 import time
 import urllib.request
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 APP = "netspeed"
 PROTO_TAG = "NETSPEED1"
 
@@ -980,8 +980,9 @@ def find_iperf(cfg: dict, override: str | None = None) -> str | None:
 
 
 def iperf_client(host: str, port: int, duration: int, streams: int, mode: str,
-                 iperf_path: str) -> dict:
-    result = {"download": None, "upload": None, "latency": None, "raw": ""}
+                 iperf_path: str, udp: bool = False, bandwidth: str | None = None) -> dict:
+    result = {"download": None, "upload": None, "latency": None, "jitter": None,
+              "lost_percent": None, "lost_packets": None, "raw": ""}
     runs = []
     if mode in ("both", "up"):
         runs.append(("up", []))
@@ -990,12 +991,24 @@ def iperf_client(host: str, port: int, duration: int, streams: int, mode: str,
     for label, flags in runs:
         cmd = [iperf_path, "-c", host, "-p", str(port), "-t", str(duration),
                "-P", str(streams), "-J"] + flags
+        if udp:
+            cmd += ["-u", "-b", str(bandwidth or "0")]
         proc = run_cmd(cmd, timeout=duration + 30)
         result["raw"] += (proc.stdout or "") + "\n"
         try:
             data = json.loads(proc.stdout)
             end = data.get("end", {})
-            if label == "up":
+            if udp:
+                summ = end.get("sum", {})
+                mbps = summ.get("bits_per_second", 0) / 1e6
+                if label == "up":
+                    result["upload"] = mbps
+                else:
+                    result["download"] = mbps
+                result["jitter"] = summ.get("jitter_ms")
+                result["lost_percent"] = summ.get("lost_percent")
+                result["lost_packets"] = summ.get("lost_packets")
+            elif label == "up":
                 result["upload"] = end.get("sum_sent", {}).get("bits_per_second", 0) / 1e6
                 result["latency"] = end.get("sum_sent", {}).get("jitter_ms")
             else:
@@ -1025,8 +1038,15 @@ def builtin_serve(host: str, port: int) -> None:
     srv.bind((host, port))
     srv.listen(5)
     srv.settimeout(0.5)
-    print(col(t(f"[內建對測伺服器] 監聽 {host}:{port}  (Ctrl+C 結束)",
-                f"[Builtin pair server] listening on {host}:{port}  (Ctrl+C to stop)"), "green"))
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        udp.bind((host, port))
+        threading.Thread(target=_builtin_udp_server, args=(udp,), daemon=True).start()
+    except OSError:
+        udp = None
+    print(col(t(f"[內建對測伺服器] 監聽 {host}:{port} (TCP/UDP)  (Ctrl+C 結束)",
+                f"[Builtin pair server] listening on {host}:{port} (TCP/UDP)  (Ctrl+C to stop)"), "green"))
     print(t("等待對測端連線...", "Waiting for peer connection..."))
     try:
         while True:
@@ -1041,7 +1061,73 @@ def builtin_serve(host: str, port: int) -> None:
         pass
     finally:
         srv.close()
+        if udp is not None:
+            try:
+                udp.close()
+            except OSError:
+                pass
     print(t("\n伺服器結束。", "\nServer stopped."))
+
+
+def _builtin_udp_server(sock: socket.socket) -> None:
+    """內建 UDP 對測伺服器: 單一 socket 迴圈處理控制訊息與資料。"""
+    active: dict = {}
+    sock.settimeout(0.5)
+    while True:
+        try:
+            data, addr = sock.recvfrom(65535)
+        except socket.timeout:
+            data = None
+        except OSError:
+            return
+        now = time.time()
+        for a in list(active):
+            st = active[a]
+            if now > st["end"]:
+                mbps = st["total"] * 8 / 1e6 / st["dur"] if st["dur"] > 0 else 0
+                try:
+                    sock.sendto(f"RESULT {mbps:.3f}\n".encode(), a)
+                except OSError:
+                    pass
+                print(t(f"   上傳 {mbps:8.2f} Mbps  (來自 {a[0]}:{a[1]})",
+                        f"   up   {mbps:8.2f} Mbps  (from {a[0]}:{a[1]})"))
+                del active[a]
+        if data is None:
+            continue
+        text = data.decode("utf-8", "replace") if len(data) < 128 else ""
+        if text.startswith(PROTO_TAG):
+            parts = text.split()
+            if len(parts) >= 3:
+                try:
+                    seconds = float(parts[2])
+                except ValueError:
+                    continue
+                if parts[1] == "udp-down":
+                    print(col(t(f"\n-> UDP 連線來自 {addr[0]}:{addr[1]}",
+                                f"\n-> UDP connection from {addr[0]}:{addr[1]}"), "cyan"))
+                    threading.Thread(target=_builtin_udp_stream_down,
+                                     args=(sock, addr, seconds), daemon=True).start()
+                elif parts[1] == "udp-up":
+                    active[addr] = {"end": now + seconds, "total": 0, "dur": seconds}
+            continue
+        if addr in active:
+            active[addr]["total"] += len(data)
+
+
+def _builtin_udp_stream_down(sock: socket.socket, addr, seconds: float) -> None:
+    payload = b"\x00" * 1400
+    t0 = time.time()
+    total = 0
+    while time.time() - t0 < seconds:
+        try:
+            sock.sendto(payload, addr)
+        except OSError:
+            break
+        total += len(payload)
+    dt = time.time() - t0
+    mbps = total * 8 / 1e6 / dt if dt > 0 else 0
+    print(t(f"   下載 {mbps:8.2f} Mbps  (傳給 {addr[0]}:{addr[1]})",
+            f"   down {mbps:8.2f} Mbps  (to {addr[0]}:{addr[1]})"))
 
 
 def _builtin_handle(conn: socket.socket, addr) -> None:
@@ -1153,8 +1239,74 @@ def _builtin_measure_up(host: str, port: int, seconds: float) -> float | None:
     return total * 8 / 1e6 / dt if dt > 0 and total else None
 
 
-def builtin_client(host: str, port: int, duration: int, mode: str) -> dict:
+def _builtin_udp_down(host: str, port: int, seconds: float) -> float | None:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.sendto(f"{PROTO_TAG} udp-down {seconds}\n".encode(), (host, port))
+    except OSError as exc:
+        warn(t(f"無法連線 {host}:{port} ({exc})", f"Cannot connect {host}:{port} ({exc})"))
+        s.close()
+        return None
+    s.settimeout(0.5)
+    first = last = None
+    total = 0
+    deadline = time.time() + seconds + 3
+    while time.time() < deadline:
+        try:
+            data, _ = s.recvfrom(65535)
+        except socket.timeout:
+            if first is not None and last is not None and time.time() - last > 1.0:
+                break
+            continue
+        except OSError:
+            break
+        now = time.time()
+        if first is None:
+            first = now
+        last = now
+        total += len(data)
+    s.close()
+    dt = (last - first) if (first is not None and last is not None and last > first) else 0
+    return total * 8 / 1e6 / dt if dt > 0 and total else None
+
+
+def _builtin_udp_up(host: str, port: int, seconds: float) -> float | None:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.sendto(f"{PROTO_TAG} udp-up {seconds}\n".encode(), (host, port))
+    except OSError as exc:
+        warn(t(f"無法連線 {host}:{port} ({exc})", f"Cannot connect {host}:{port} ({exc})"))
+        s.close()
+        return None
+    payload = b"\x00" * 1400
+    t0 = time.time()
+    while time.time() - t0 < seconds:
+        try:
+            s.sendto(payload, (host, port))
+        except OSError:
+            break
+    s.settimeout(5)
+    mbps = None
+    try:
+        resp, _ = s.recvfrom(256)
+        m = re.search(r"RESULT\s+([\d.]+)", resp.decode("utf-8", "replace"))
+        if m:
+            mbps = float(m.group(1))
+    except (socket.timeout, OSError):
+        pass
+    s.close()
+    return mbps
+
+
+def builtin_client(host: str, port: int, duration: int, mode: str, udp: bool = False) -> dict:
     result = {"download": None, "upload": None, "latency": None}
+    if udp:
+        if mode in ("both", "down"):
+            result["download"] = _builtin_udp_down(host, port, duration)
+        if mode in ("both", "up"):
+            result["upload"] = _builtin_udp_up(host, port, duration)
+        return result
+
     results = {}
     threads = []
 
@@ -1186,6 +1338,8 @@ def run_pair_client(host: str, cfg: dict, args) -> dict:
     duration = args.duration or get_dotted(cfg, "iperf.duration") or 8
     streams = args.streams or get_dotted(cfg, "iperf.streams") or 1
     mode = getattr(args, "mode", "both")
+    udp = getattr(args, "udp", False)
+    bandwidth = getattr(args, "bandwidth", None)
 
     iperf_path = find_iperf(cfg, getattr(args, "iperf_path", None))
     method = args.method
@@ -1196,18 +1350,21 @@ def run_pair_client(host: str, cfg: dict, args) -> dict:
         warn(t("找不到 iperf3, 改用內建對測", "iperf3 not found, using builtin pair"))
         method = "builtin"
 
-    print(col(t(f"[對測] 目標 {host}:{port}  方式={method}  模式={mode}  秒數={duration}",
-                f"[Pair] target {host}:{port}  method={method}  mode={mode}  seconds={duration}"),
+    proto = "UDP" if udp else "TCP"
+    print(col(t(f"[對測] 目標 {host}:{port}  方式={method}  協定={proto}  模式={mode}  秒數={duration}",
+                f"[Pair] target {host}:{port}  method={method}  proto={proto}  mode={mode}  seconds={duration}"),
               "cyan"))
     t0 = time.time()
     if method == "iperf3":
-        res = iperf_client(host, port, duration, streams, mode, iperf_path)
+        res = iperf_client(host, port, duration, streams, mode, iperf_path,
+                           udp=udp, bandwidth=bandwidth)
     else:
-        res = builtin_client(host, port, duration, mode)
+        res = builtin_client(host, port, duration, mode, udp=udp)
     res["elapsed"] = round(time.time() - t0, 1)
 
     res.update({"kind": "pair", "time": now_iso(), "role": "client",
-                "peer_ip": host, "peer_port": port, "method": method, "mode": mode})
+                "peer_ip": host, "peer_port": port, "method": method, "mode": mode,
+                "proto": proto})
     return res
 
 
@@ -1286,11 +1443,17 @@ def print_pair_result(res: dict) -> None:
     print(t(f"  對端    : {res.get('peer_ip')}:{res.get('peer_port')}",
             f"  Peer    : {res.get('peer_ip')}:{res.get('peer_port')}"))
     print(t(f"  方式    : {res.get('method')}", f"  Method  : {res.get('method')}"))
+    if res.get("proto"):
+        print(t(f"  協定    : {res.get('proto')}", f"  Proto   : {res.get('proto')}"))
     print(t(f"  時間    : {res.get('time')}", f"  Time    : {res.get('time')}"))
     if res.get("download") is not None:
         print(t("  下載    : ", "  Download: ") + col(f"{res['download']:.2f} Mbps", "green"))
     if res.get("upload") is not None:
         print(t("  上傳    : ", "  Upload  : ") + col(f"{res['upload']:.2f} Mbps", "green"))
+    if res.get("jitter") is not None:
+        print(t(f"  Jitter  : {res['jitter']:.3f} ms", f"  Jitter  : {res['jitter']:.3f} ms"))
+    if res.get("lost_percent") is not None:
+        print(t(f"  遺失    : {res['lost_percent']:.2f}%", f"  Loss    : {res['lost_percent']:.2f}%"))
     if res.get("elapsed") is not None:
         print(t(f"  耗時    : {res['elapsed']}s", f"  Elapsed : {res['elapsed']}s"))
 
@@ -1776,6 +1939,27 @@ def _try_download_tool(tool: dict) -> tuple:
     return False, tool.get("url", "")
 
 
+def _print_tool_download_help(missing: list) -> None:
+    section(t("如何下載測速工具", "How to download speed tools"))
+    for tool in missing:
+        print("  " + col(tool["label"], "bold"))
+        kind = tool.get("kind")
+        if kind == "npm":
+            print("    " + t("安裝 Node.js 後執行: npm install -g fast-cli",
+                             "Install Node.js, then run: npm install -g fast-cli"))
+        elif kind == "github":
+            print("    " + t("下載對應本平台的檔案, 放到 PATH 或 netspeed 同層目錄:",
+                             "Download the file for your platform to PATH or next to netspeed:"))
+            print("    " + tool["url"])
+        else:
+            print("    " + t("下載並放到 PATH 或 netspeed 同層目錄:",
+                             "Download to PATH or next to netspeed:"))
+            print("    " + tool["url"])
+    print()
+    print(tcol("  " + t("放好後可用 speed check --refresh 重新檢查。",
+                        "After placing them, run speed check --refresh."), "dim"))
+
+
 def cmd_speed_check(cfg: dict, args) -> None:
     use_json = getattr(args, "json", False)
     entries = [(tool, find_tool(tool["names"])) for tool in SPEED_TOOLS]
@@ -1803,13 +1987,18 @@ def cmd_speed_check(cfg: dict, args) -> None:
     if assume:
         ans = "y"
     else:
-        try:
-            ans = input(col(t("是否協助自動下載缺少的工具? [y=下載 / 任一鍵=返回]: ",
-                              "Download missing tools now? [y=download / any key=back]: "),
-                            "bold")).strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return
+        while True:
+            try:
+                ans = input(col(t("是否協助自動下載缺少的工具? [y=下載 / h=說明 / 任一鍵=返回]: ",
+                                  "Download missing tools now? [y=download / h=help / any key=back]: "),
+                                "bold")).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+            if ans == "h":
+                _print_tool_download_help(missing)
+                continue
+            break
     if ans != "y":
         info(t("已返回。", "Returned."))
         return
@@ -1862,8 +2051,8 @@ def cmd_pair_client(cfg: dict, args) -> dict:
     if not args.no_save:
         rec = {"kind": "pair"}
         rec.update({k: res.get(k) for k in
-                    ("role", "peer_ip", "peer_port", "method", "mode",
-                     "download", "upload", "latency", "elapsed")})
+                    ("role", "peer_ip", "peer_port", "method", "mode", "proto",
+                     "download", "upload", "latency", "jitter", "lost_percent", "elapsed")})
         append_history(rec, cfg)
     return res
 
@@ -2333,6 +2522,39 @@ def _linux_dhcp_methods() -> dict:
     return methods
 
 
+def _fmt_link_speed(mbps) -> str | None:
+    try:
+        n = int(round(float(mbps)))
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    if n >= 1000:
+        return f"{n / 1000:g} Gbps"
+    return f"{n} Mbps"
+
+
+def _linux_link_speed(name: str) -> str | None:
+    try:
+        with open(f"/sys/class/net/{name}/speed", "r", encoding="utf-8") as fh:
+            return _fmt_link_speed(fh.read().strip())
+    except Exception:
+        pass
+    proc = run_cmd(["ethtool", name], timeout=5)
+    m = re.search(r"Speed:\s*(\d+)\s*Mb/s", proc.stdout or "")
+    return _fmt_link_speed(m.group(1)) if m else None
+
+
+def _mac_media_speed(text: str) -> str | None:
+    m = re.search(r"(\d+)(G?)base", text)
+    if not m:
+        return None
+    n = int(m.group(1))
+    if m.group(2):
+        n *= 1000
+    return _fmt_link_speed(n)
+
+
 def _net_linux() -> dict:
     data = {"interfaces": [], "routes": []}
     dhcp = _linux_dhcp_methods()
@@ -2363,6 +2585,7 @@ def _net_linux() -> dict:
             "status": iface.get("operstate"),
             "dhcp": dhcp.get(name),
             "gateway": None,
+            "speed": _linux_link_speed(name),
         })
 
     routes = _loads_loose(run_cmd(["ip", "-j", "route", "show"], timeout=10).stdout or "")
@@ -2466,7 +2689,7 @@ def _net_macos() -> dict:
         if m:
             cur = m.group(1)
             ifaces[cur] = {"name": cur, "ipv4": [], "mac": None, "status": None,
-                           "dhcp": None, "gateway": None}
+                           "dhcp": None, "gateway": None, "speed": None}
             continue
         if cur is None:
             continue
@@ -2484,6 +2707,10 @@ def _net_macos() -> dict:
                                         "cidr": f"{ip}/{prefix}" if prefix is not None else ip})
         elif s.startswith("ether "):
             ifaces[cur]["mac"] = s.split()[1]
+        elif s.startswith("media:"):
+            spd = _mac_media_speed(s)
+            if spd:
+                ifaces[cur]["speed"] = spd
         elif s.startswith("status:"):
             ifaces[cur]["status"] = s.split(":", 1)[1].strip()
 
@@ -2554,6 +2781,8 @@ def _print_iface(iface: dict) -> None:
           + (f"   MAC: {iface['mac']}" if iface.get("mac") else ""))
     print(t(f"  設定方式 : {_dhcp_text(iface.get('dhcp'))}",
             f"  Config   : {_dhcp_text(iface.get('dhcp'))}"))
+    if iface.get("speed"):
+        print(t(f"  Link Speed : {iface.get('speed')}", f"  Link Speed : {iface.get('speed')}"))
     for item in iface.get("ipv4", []):
         tag = t("次要 Sub IP", "secondary") if item.get("secondary") else t("主要", "primary")
         mask = item.get("netmask") or "?"
@@ -3197,16 +3426,19 @@ def help_sections() -> list:
         ("show ping", t("Ping 設定 (含目前閘道值)", "ping settings (with current gateway)")),
         ("show tools", t("工具狀態 (* = all 會執行; 分 ping / 測速)",
                          "tool status (* = runs under all; ping / speed)")),
+        ("show speed", t("測速工具檢查 (等同 speed check)", "speed tool check (same as speed check)")),
         ("show env", t("環境狀態檢查 (Python / 設定目錄 / 網路)",
                        "environment check (Python / config dir / internet)")),
-        ("show interfaces", t("本機網路設定: DHCP/IP/閘道/路由", "local network: DHCP/IP/gateway/routes")),
+        ("show interfaces", t("本機網路設定: DHCP/IP/閘道/Link Speed/路由",
+                              "local network: DHCP/IP/gateway/link speed/routes")),
         ("show config|theme|history|version", t("各項目前狀態", "current state")),
         ("netinfo [iface] [--all] [-i] [--refresh]", t("等同 show interfaces", "same as show interfaces")),
     ]),
     (t("對測 (pair)", "Pair"), [
-        ("pair serve", t("開對測伺服器 (優先 iperf3, 否則內建)", "run pair server (iperf3 or builtin)")),
-        ("pair client <host>", t("連到對測端 (--mode both|down|up --duration --streams)",
-                                 "connect to peer (--mode both|down|up --duration --streams)")),
+        ("pair serve", t("開對測伺服器 (優先 iperf3, 否則內建; 支援 TCP/UDP)",
+                         "run pair server (iperf3 or builtin; TCP/UDP)")),
+        ("pair client <host>", t("連到對測端 (--mode both|down|up --duration --streams --udp -b 100M)",
+                                 "connect to peer (--mode both|down|up --duration --streams --udp -b 100M)")),
         ("pair history", t("看對測歷史", "pair history")),
     ]),
     (t("設定 (config)", "Config"), [
@@ -3289,10 +3521,18 @@ def print_help() -> None:
                "title") + "  " + tcol(f"v{VERSION}", "dim"))
     print()
     print(t("用法: ", "Usage: ") + col("netspeed <command> [args...]", "bold"))
-    print("      " + col("netspeed", "bold")
-          + t("  (不帶參數 → 倒數後跑預設; console 進互動模式; exit 離開)",
-              "  (no args → run default after countdown; console for interactive; exit to quit)"))
+    if _IN_CONSOLE:
+        print("      " + t("(互動模式中; 輸入 exit 離開, help 看指令)",
+                           "(interactive mode; type exit to quit, help for commands)"))
+    else:
+        print("      " + col("netspeed", "bold")
+              + t("  (不帶參數 → 倒數後跑預設; console 進互動模式; exit 離開)",
+                  "  (no args → run default after countdown; console for interactive; exit to quit)"))
     for title, items in help_sections():
+        if _IN_CONSOLE:
+            items = [(n, d) for (n, d) in items if not n.lower().startswith(("console", "shell"))]
+            if not items:
+                continue
         print()
         print(tcol(f"【{title}】" if LANG != "en" else f"[{title}]", "heading"))
         for name, desc in items:
@@ -3393,6 +3633,7 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--method", choices=["auto", "iperf3", "builtin"], default="auto")
     ps.add_argument("--iperf-path")
     ps.add_argument("--duration", type=int)
+    ps.add_argument("--udp", action="store_true", help="UDP 對測 (iperf3 自動偵測; 內建支援 UDP)")
     pc = pair_sub.add_parser("client", parents=[common], help="連到對測端")
     pc.add_argument("host")
     pc.add_argument("--port", type=int)
@@ -3401,6 +3642,8 @@ def build_parser() -> argparse.ArgumentParser:
     pc.add_argument("--duration", type=int)
     pc.add_argument("--streams", type=int)
     pc.add_argument("--iperf-path")
+    pc.add_argument("--udp", action="store_true", help="使用 UDP 測試 (需 iperf3 或內建)")
+    pc.add_argument("-b", "--bandwidth", help="UDP 目標頻寬 (iperf3 -b, 例 100M / 0=不限)")
     pair_sub.add_parser("history", parents=[common], help="對測歷史")
 
     ph = sub.add_parser("history", parents=[common], help="歷史紀錄")
@@ -3668,6 +3911,7 @@ SHOW_MAP = {
     "interfaces": ["netinfo"],
     "tools": ["show-tools"],
     "env": ["show-env"],
+    "speed": ["speed", "check"],
     "theme": ["theme"],
     "history": ["history"],
     "version": ["version"],
@@ -3725,8 +3969,8 @@ ARG_CANDIDATES = {
 }
 
 PAIR_OPTS = {
-    "serve": ["--host", "--port", "--method", "--iperf-path", "--duration"],
-    "client": ["--port", "--method", "--mode", "--duration", "--streams", "--iperf-path"],
+    "serve": ["--host", "--port", "--method", "--iperf-path", "--duration", "--udp"],
+    "client": ["--port", "--method", "--mode", "--duration", "--streams", "--iperf-path", "--udp", "-b", "--bandwidth"],
     "history": [],
 }
 
@@ -3745,6 +3989,7 @@ def arg_help() -> dict:
     "--seconds": "秒數", "--upload": "加測上傳", "--kind": "篩選類型", "--limit": "筆數",
     "--run": "直接重跑編號", "--no-path": "不動 PATH", "-y": "不詢問",
     "-p": "IP 查詢來源", "--provider": "IP 查詢來源 (ipinfo.io/ifconfig.co/ip-api.com)",
+    "--udp": "UDP 測試", "-b": "UDP 頻寬", "--bandwidth": "UDP 目標頻寬 (例 100M, 0=不限)",
     "--purge": "同時刪除設定", "--reset-skip": "清除不再通知版本",
 }
 
@@ -3802,10 +4047,17 @@ def _arg_candidates(cmd: str, completed: list) -> list:
     return ARG_CANDIDATES.get(cmd, [])
 
 
+def _command_pool() -> list:
+    """console 內可用指令; 已在 console 時排除 console/shell。"""
+    if _IN_CONSOLE:
+        return [c for c in COMMAND_ORDER if c not in ("console", "shell")]
+    return list(COMMAND_ORDER)
+
+
 def _candidates_for(buffer: str) -> list:
     if " " not in buffer:
         t = buffer.lower()
-        return [c for c in COMMAND_ORDER if c.startswith(t)]
+        return [c for c in _command_pool() if c.startswith(t)]
     parts = buffer.split(" ")
     cmd = parts[0].lower()
     if buffer.endswith(" "):
@@ -3831,7 +4083,7 @@ def _expand_prefix(token: str, in_config: bool = False) -> str:
                 "config", "targets", "endpoints", "theme", "get", "check",
                 "netinfo", "ip", "version"]
     else:
-        pool = COMMAND_ORDER
+        pool = _command_pool()
     matches = [c for c in pool if c.startswith(low)]
     if len(matches) == 1 and matches[0] != low:
         return matches[0]
@@ -3854,7 +4106,7 @@ def _print_candidates(prompt: str, text: str) -> None:
 
 def _tab_complete(prompt: str, text: str) -> str:
     if " " not in text:
-        cands = [c for c in COMMAND_ORDER if c.startswith(text.lower())]
+        cands = [c for c in _command_pool() if c.startswith(text.lower())]
         if not cands:
             return text
         new = cands[0] + " " if len(cands) == 1 else os.path.commonprefix(cands)
@@ -4191,6 +4443,9 @@ def console(start_in_config: bool = False) -> int:
             continue
         if first == "end":
             warn(t("目前不在設定模式", "Not in config mode"))
+            continue
+        if first in ("console", "shell"):
+            warn(t("已在互動模式中", "Already in interactive mode"))
             continue
         if first not in COMMANDS:
             cands = _candidates_for(first)
