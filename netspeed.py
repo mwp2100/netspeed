@@ -45,7 +45,7 @@ import threading
 import time
 import urllib.request
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 APP = "netspeed"
 PROTO_TAG = "NETSPEED1"
 
@@ -191,6 +191,52 @@ def ok(msg: str) -> None:
     print(tcol(f"[v] {msg}", "ok"))
 
 
+# --------------------------------------------------------------------------- #
+# Debug 模式 — 開啟後把所有指令與外部程式的原始輸出 (未經處理) 印到 stderr,
+# 方便使用者回報問題時貼上完整資訊。輸出到 stderr 才不會污染 --json / 管線。
+# --------------------------------------------------------------------------- #
+
+DEBUG = False
+
+
+def dbg(category: str, message: str) -> None:
+    """開啟 debug 時, 印出一行除錯訊息到 stderr。"""
+    if not DEBUG:
+        return
+    try:
+        sys.stderr.write(f"[debug] {category}: {message}\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def dbg_block(title: str, text: str) -> None:
+    """開啟 debug 時, 印出一段原始 (未處理) 的文字區塊到 stderr。"""
+    if not DEBUG or not text:
+        return
+    try:
+        sys.stderr.write(f"[debug] --- {title} ---\n")
+        sys.stderr.write(text if text.endswith("\n") else text + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def cmd_str(cmd) -> str:
+    """把指令 list 還原成可讀、可複製的字串。"""
+    try:
+        return " ".join(shlex.quote(str(c)) for c in cmd)
+    except Exception:
+        return str(cmd)
+
+
+def _debug_enabled(cfg: dict | None = None) -> bool:
+    env = os.environ.get("NETSPEED_DEBUG", "").strip().lower()
+    if env and env not in ("0", "false", "no", "off"):
+        return True
+    return bool(cfg.get("debug")) if cfg else False
+
+
 # 本次執行/console session 內的快取 (給讀取較慢的指令用, 例如 netinfo)
 _SESSION_CACHE: dict = {}
 
@@ -205,6 +251,7 @@ def cache_clear() -> None:
 
 DEFAULT_CONFIG = {
     "lang": "en",                  # en | zh-TW (預設英文)
+    "debug": False,                # True = 執行時輸出 debug 訊息到 stderr
     "ping": {
         "method": "auto",          # auto | icmp | system
         "count": 5,
@@ -382,9 +429,36 @@ def _trim_history(cfg: dict) -> None:
 # --------------------------------------------------------------------------- #
 
 
+_NPM_BIN_CACHE = None
+
+
+def _npm_global_bin() -> str | None:
+    """npm 全域執行檔目錄 (Windows 在 prefix 本身, Unix 在 prefix/bin)。"""
+    global _NPM_BIN_CACHE
+    if _NPM_BIN_CACHE is not None:
+        return _NPM_BIN_CACHE or None
+    _NPM_BIN_CACHE = ""
+    npm = shutil.which("npm")
+    if not npm:
+        return None
+    try:
+        proc = run_cmd([npm, "prefix", "-g"], timeout=20)
+    except Exception:
+        return None
+    prefix = (proc.stdout or "").strip()
+    if proc.returncode != 0 or not prefix:
+        return None
+    path = prefix if os.name == "nt" else os.path.join(prefix, "bin")
+    if os.path.isdir(path):
+        _NPM_BIN_CACHE = path
+        return path
+    return None
+
+
 def _local_tool_dirs() -> list:
     dirs = []
-    for d in (os.path.dirname(os.path.abspath(__file__)), install_dir(), os.getcwd()):
+    for d in (os.path.dirname(os.path.abspath(__file__)), install_dir(), os.getcwd(),
+              _npm_global_bin()):
         if d and d not in dirs:
             dirs.append(d)
     return dirs
@@ -404,14 +478,17 @@ def find_tool(names, custom: str | None = None) -> str | None:
     for name in names:
         found = shutil.which(name)
         if found:
+            dbg("find_tool", f"{names} -> {found}")
             return found
-    exts = [""] if os.name != "nt" else ["", ".exe", ".cmd", ".bat", ".ps1"]
+    exts = [""] if os.name != "nt" else [".exe", ".cmd", ".bat", ".ps1", ""]
     for d in _local_tool_dirs():
         for name in names:
             for ext in exts:
                 cand = os.path.join(d, name + ext)
                 if os.path.isfile(cand) and (os.name == "nt" or os.access(cand, os.X_OK)):
+                    dbg("find_tool", f"{names} -> {cand}")
                     return cand
+    dbg("find_tool", f"{names} -> not found")
     return None
 
 
@@ -423,8 +500,11 @@ def _fix_cmd(cmd: list) -> list:
 
 def run_cmd(cmd: list, timeout: float | None = None, input_data: bytes | None = None):
     fixed = _fix_cmd(list(cmd))
+    if DEBUG:
+        dbg("exec", cmd_str(fixed) + (f"   (timeout={timeout}s)" if timeout else ""))
+    t0 = time.time()
     try:
-        return subprocess.run(
+        proc = subprocess.run(
             fixed,
             capture_output=True,
             text=True,
@@ -433,11 +513,16 @@ def run_cmd(cmd: list, timeout: float | None = None, input_data: bytes | None = 
             input=input_data,
         )
     except FileNotFoundError:
-        return subprocess.CompletedProcess(fixed, 127, "", f"{cmd[0]}: not found")
+        proc = subprocess.CompletedProcess(fixed, 127, "", f"{cmd[0]}: not found")
     except subprocess.TimeoutExpired as exc:
         out = exc.stdout if isinstance(exc.stdout, str) else ""
         err = exc.stderr if isinstance(exc.stderr, str) else ""
-        return subprocess.CompletedProcess(fixed, 124, out or "", (err or "") + "\n[timeout]")
+        proc = subprocess.CompletedProcess(fixed, 124, out or "", (err or "") + "\n[timeout]")
+    if DEBUG:
+        dbg("exec", f"rc={proc.returncode}  {time.time() - t0:.2f}s")
+        dbg_block("stdout", proc.stdout or "")
+        dbg_block("stderr", proc.stderr or "")
+    return proc
 
 
 # --------------------------------------------------------------------------- #
@@ -447,8 +532,16 @@ def run_cmd(cmd: list, timeout: float | None = None, input_data: bytes | None = 
 
 def _http_get(url: str, timeout: float = 8.0) -> str:
     req = urllib.request.Request(url, headers={"User-Agent": f"netspeed/{VERSION}"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+    dbg("http", f"GET {url}")
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read()
+    except Exception as exc:
+        dbg("http", f"GET {url} -> ERROR {exc}")
+        raise
+    dbg("http", f"GET {url} -> {len(data)} bytes  {time.time() - t0:.2f}s")
+    return data.decode("utf-8", errors="replace")
 
 
 IP_PROVIDERS = {
@@ -1851,8 +1944,12 @@ def _platform_keywords() -> tuple:
 
 def _download_file(url: str, timeout: float = 60.0) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": f"netspeed/{VERSION}"})
+    dbg("http", f"GET {url}")
+    t0 = time.time()
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+        data = resp.read()
+    dbg("http", f"GET {url} -> {len(data)} bytes  {time.time() - t0:.2f}s")
+    return data
 
 
 def _github_asset(repo: str, keywords: tuple) -> dict | None:
@@ -1920,9 +2017,17 @@ def _try_download_tool(tool: dict) -> tuple:
         if not npm:
             return False, t("找不到 npm (需先安裝 Node.js)", "npm not found (install Node.js first)")
         proc = run_cmd([npm, "install", "-g", tool["pkg"]], timeout=300)
-        if proc.returncode == 0:
-            return True, tool["pkg"]
-        return False, ((proc.stderr or proc.stdout or "").strip()[:200] or "npm failed")
+        if proc.returncode != 0:
+            return False, ((proc.stderr or proc.stdout or "").strip()[:200] or "npm failed")
+        global _NPM_BIN_CACHE
+        _NPM_BIN_CACHE = None  # 重新偵測 (npm 全域目錄可能剛被建立)
+        found = find_tool(tool["names"])
+        if found:
+            return True, found
+        npm_bin = _npm_global_bin()
+        return False, t(
+            f"npm 回報成功但找不到 {tool['bin']} 執行檔; npm 全域目錄: {npm_bin or '未知'}",
+            f"npm reported success but {tool['bin']} not found; npm global dir: {npm_bin or 'unknown'}")
     if kind == "github":
         try:
             asset = _github_asset(tool["repo"], _platform_keywords())
@@ -3003,6 +3108,36 @@ def cmd_show_env(cfg: dict, args) -> None:
     print(f"  {t('正常項目', 'OK items')}: {usable}/{len(env)}")
 
 
+def cmd_show_debug(cfg: dict, args) -> None:
+    global DEBUG
+    action = str(getattr(args, "action", None) or "status").lower()
+    if action in ("enable", "on", "true", "yes"):
+        cfg["debug"] = True
+        save_config(cfg, getattr(args, "config", None))
+        DEBUG = True
+        ok(t("已開啟 debug 模式 (已寫入設定; 之後執行都會輸出除錯訊息到 stderr)",
+             "Debug mode enabled (saved; future runs print debug info to stderr)"))
+    elif action in ("disable", "off", "false", "no"):
+        cfg["debug"] = False
+        save_config(cfg, getattr(args, "config", None))
+        DEBUG = False
+        ok(t("已關閉 debug 模式 (已寫入設定)",
+             "Debug mode disabled (saved)"))
+    elif action not in ("status", "show", ""):
+        error(t(f"未知選項: {action} (可用: enable / disable / status)",
+                f"Unknown option: {action} (use: enable / disable / status)"))
+        return
+    else:
+        state = t("開啟", "on") if cfg.get("debug") else t("關閉", "off")
+        print(f"  debug: {state}")
+        print(tcol("  " + t("用法: show debug enable|disable   (輸出到 stderr, 可用 2> 存檔)",
+                            "Usage: show debug enable|disable   (output to stderr, use 2> to save)"), "dim"))
+        return
+    print(tcol("  " + t("除錯訊息輸出到 stderr; 例如: netspeed all 2> debug.log",
+                        "Debug info goes to stderr; e.g. netspeed all 2> debug.log"), "dim"))
+    dbg("debug", t("debug 模式已開啟", "debug mode is now on"))
+
+
 def cmd_show_ping(cfg: dict, args) -> None:
     pc = cfg.get("ping", {})
     section(t("Ping 設定", "Ping settings"))
@@ -3429,6 +3564,8 @@ def help_sections() -> list:
         ("show speed", t("測速工具檢查 (等同 speed check)", "speed tool check (same as speed check)")),
         ("show env", t("環境狀態檢查 (Python / 設定目錄 / 網路)",
                        "environment check (Python / config dir / internet)")),
+        ("show debug [enable|disable]", t("除錯模式: 輸出指令與原始結果到 stderr",
+                                          "debug mode: print commands & raw output to stderr")),
         ("show interfaces", t("本機網路設定: DHCP/IP/閘道/Link Speed/路由",
                               "local network: DHCP/IP/gateway/link speed/routes")),
         ("show config|theme|history|version", t("各項目前狀態", "current state")),
@@ -3507,6 +3644,7 @@ def command_help() -> dict:
     "exit": t("離開 console", "quit console"),
     "show": t("Cisco 風格: show <項目> (ping/tools/env/...)",
               "Cisco style: show <topic> (ping/tools/env/...)"),
+    "debug": t("除錯模式: show debug enable|disable", "debug mode: show debug enable|disable"),
     "configure": t("進入設定模式 (configure / conf)", "enter config mode (configure / conf)"),
     "conf": t("configure 的縮寫", "alias of configure"),
     "write": t("設定模式: 儲存設定到檔案 (write / save)", "config mode: save (write / save)"),
@@ -3544,6 +3682,7 @@ def print_help() -> None:
     print(tcol("【通用選項】" if LANG != "en" else "[Common options]", "heading"))
     for name, desc in [("--json", t("以 JSON 輸出", "JSON output")),
                        ("--no-color", t("關閉顏色", "disable color")),
+                       ("--debug", t("輸出除錯訊息到 stderr", "print debug info to stderr")),
                        ("--config <path>", t("指定設定檔", "custom config path")),
                        ("--no-save", t("不寫入歷史紀錄", "do not save history")),
                        ("--no-update-check", t("本次不檢查更新", "skip update check"))]:
@@ -3565,10 +3704,13 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--config", metavar="PATH", help="指定設定檔路徑")
     common.add_argument("--no-save", action="store_true", help="不寫入歷史紀錄")
     common.add_argument("--no-update-check", action="store_true", help="本次不檢查更新")
+    common.add_argument("--debug", action="store_true", default=argparse.SUPPRESS,
+                        help="輸出除錯訊息到 stderr")
 
     p = argparse.ArgumentParser(prog="netspeed", description="跨平台 CLI 網路測速工具箱")
     p.add_argument("--no-color", action="store_true", help="關閉顏色")
     p.add_argument("--config", metavar="PATH", help="指定設定檔路徑")
+    p.add_argument("--debug", action="store_true", help="輸出除錯訊息到 stderr")
     p.add_argument("--version", action="version", version=f"netspeed {VERSION}")
     sub = p.add_subparsers(dest="cmd", metavar="<command>")
 
@@ -3713,6 +3855,9 @@ def build_parser() -> argparse.ArgumentParser:
         if _nm in ("show-tools", "show-env"):
             _sp.add_argument("--refresh", action="store_true")
 
+    _sd = sub.add_parser("show-debug", parents=[common], help=argparse.SUPPRESS)
+    _sd.add_argument("action", nargs="?", default="status")
+
     sub.add_parser("console", parents=[common], aliases=["shell"], help="進入互動模式")
 
     sub.add_parser("help", help="顯示完整說明")
@@ -3791,6 +3936,8 @@ def _dispatch(args, cfg: dict, parser) -> None:
         cmd_show_tools(cfg, args)
     elif cmd == "show-env":
         cmd_show_env(cfg, args)
+    elif cmd == "show-debug":
+        cmd_show_debug(cfg, args)
     elif cmd == "netinfo":
         cmd_netinfo(cfg, args)
     elif cmd == "pair":
@@ -3842,21 +3989,24 @@ def _dispatch(args, cfg: dict, parser) -> None:
 
 
 def run_command(argv, cfg: dict | None = None) -> int:
-    global USE_COLOR
+    global USE_COLOR, DEBUG
     argv = list(argv)
     if argv and argv[0].lower() in ALIAS_MAP:
         argv = ALIAS_MAP[argv[0].lower()] + argv[1:]
     if argv and argv[0].lower() == "show":
         rest = argv[1:]
-        idx = 0
-        while idx < len(rest) and not rest[idx].startswith("-"):
-            idx += 1
-        topic_tokens, flags = rest[:idx], rest[idx:]
-        mapped = _resolve_show(topic_tokens)
-        if mapped is None:
-            _print_show_topics()
-            return 0
-        argv = mapped + flags
+        if rest and rest[0].lower() == "debug":
+            argv = ["show-debug"] + rest[1:]
+        else:
+            idx = 0
+            while idx < len(rest) and not rest[idx].startswith("-"):
+                idx += 1
+            topic_tokens, flags = rest[:idx], rest[idx:]
+            mapped = _resolve_show(topic_tokens)
+            if mapped is None:
+                _print_show_topics()
+                return 0
+            argv = mapped + flags
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
@@ -3873,6 +4023,11 @@ def run_command(argv, cfg: dict | None = None) -> int:
     if cfg is None:
         cfg = load_config(getattr(args, "config", None))
     apply_theme(cfg)
+
+    if getattr(args, "debug", False) or _debug_enabled(cfg):
+        DEBUG = True
+    dbg("cmd", "netspeed " + cmd_str(argv))
+    dbg("cmd", f"config={config_path()}  lang={LANG}  color={USE_COLOR}")
 
     if not getattr(args, "json", False) and args.cmd not in ("help", "version") and not _IN_CONSOLE:
         print(tcol(f"netspeed v{VERSION}", "title"))
@@ -3899,7 +4054,7 @@ COMMANDS = {
     "pair", "history", "config", "set", "get", "targets", "endpoints", "theme",
     "check", "netinfo", "update", "version", "install", "uninstall",
     "console", "shell", "help", "refresh", "speed",
-    "show-ping", "show-tools", "show-env",
+    "show-ping", "show-tools", "show-env", "show-debug",
     # Cisco 風格 (由 console / run_command 前置處理)
     "show", "configure", "conf", "write", "save", "no", "end",
 }
@@ -3911,6 +4066,7 @@ SHOW_MAP = {
     "interfaces": ["netinfo"],
     "tools": ["show-tools"],
     "env": ["show-env"],
+    "debug": ["show-debug"],
     "speed": ["speed", "check"],
     "theme": ["theme"],
     "history": ["history"],
@@ -3965,6 +4121,7 @@ ARG_CANDIDATES = {
     "install": ["--no-path", "-y"],
     "uninstall": ["--purge", "--no-path", "-y"],
     "show": list(SHOW_MAP.keys()),
+    "show-debug": ["enable", "disable", "status"],
     "speed": ["all", "mlab", "fast", "cloudflare", "ookla", "libre", "check"],
 }
 
@@ -3984,6 +4141,7 @@ def arg_help() -> dict:
     "all": "全部測速來源", "check": "檢查測速工具並可協助下載", "tools": "檢查測速工具",
     "mlab": "M-Lab", "fast": "fast.com", "cloudflare": "Cloudflare", "ookla": "Ookla", "libre": "LibreSpeed",
     "ping": "Ping 設定", "env": "環境狀態檢查", "interfaces": "本機網路設定",
+    "debug": "除錯模式", "enable": "開啟", "disable": "關閉", "status": "顯示狀態",
     "--all": "顯示所有介面", "--refresh": "重新讀取 (不讀快取)", "--json": "JSON 輸出",
     "--sources": "指定來源", "--no-ping": "略過 ping", "--no-ip": "略過外網 IP",
     "--seconds": "秒數", "--upload": "加測上傳", "--kind": "篩選類型", "--limit": "筆數",
@@ -4042,6 +4200,10 @@ def _arg_candidates(cmd: str, completed: list) -> list:
         return PAIR_OPTS.get(completed[0], [])
     if cmd in ("set", "get", "no"):
         return _config_keys()
+    if cmd == "show":
+        if completed and completed[0].lower() == "debug":
+            return ["enable", "disable", "status"]
+        return list(SHOW_MAP.keys())
     if cmd == "ping":
         return _ping_candidates()
     return ARG_CANDIDATES.get(cmd, [])
@@ -4363,13 +4525,14 @@ def _config_mode_cmd(tokens: list, cfg: dict, state: dict):
 
 
 def console(start_in_config: bool = False) -> int:
-    global USE_COLOR, _CONSOLE_CFG, _DEFER_SAVE, _IN_CONSOLE
+    global USE_COLOR, _CONSOLE_CFG, _DEFER_SAVE, _IN_CONSOLE, DEBUG
     _IN_CONSOLE = True
     if not sys.stdout.isatty():
         USE_COLOR = False
     cfg = load_config()
     _CONSOLE_CFG = cfg
     apply_theme(cfg)
+    DEBUG = _debug_enabled(cfg)
     history: list = []
     in_config = start_in_config
     _DEFER_SAVE = start_in_config
@@ -4541,8 +4704,10 @@ def _countdown_wait(seconds: int) -> str:
 
 
 def run_default_with_countdown(seconds: int = 5) -> int:
+    global DEBUG
     cfg = load_config()
     apply_theme(cfg)
+    DEBUG = _debug_enabled(cfg)
     print(tcol(f"netspeed v{VERSION}", "title"))
     try:
         check_update(cfg, interactive=True)
