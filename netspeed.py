@@ -45,7 +45,7 @@ import threading
 import time
 import urllib.request
 
-VERSION = "1.6.0"
+VERSION = "1.7.0"
 APP = "netspeed"
 PROTO_TAG = "NETSPEED1"
 
@@ -189,6 +189,37 @@ def error(msg: str) -> None:
 
 def ok(msg: str) -> None:
     print(tcol(f"[v] {msg}", "ok"))
+
+
+# --------------------------------------------------------------------------- #
+# 進度顯示 — 執行中就地更新同一行 (例如 "(1/4) 正在 ping ..."), 讓使用者知道
+# 沒卡住、目前跑到第幾項; 結果仍由最後的統整表呈現。僅在終端機 (tty) 顯示。
+# --------------------------------------------------------------------------- #
+
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
+_PROGRESS_LEN = 0
+
+
+def _visible_len(text: str) -> int:
+    return len(_ANSI_RE.sub("", text))
+
+
+def progress(text: str) -> None:
+    global _PROGRESS_LEN
+    if not sys.stdout.isatty():
+        return
+    pad = max(0, _PROGRESS_LEN - _visible_len(text))
+    sys.stdout.write("\r" + text + " " * pad)
+    sys.stdout.flush()
+    _PROGRESS_LEN = _visible_len(text)
+
+
+def progress_end() -> None:
+    global _PROGRESS_LEN
+    if sys.stdout.isatty() and _PROGRESS_LEN:
+        sys.stdout.write("\r" + " " * _PROGRESS_LEN + "\r")
+        sys.stdout.flush()
+    _PROGRESS_LEN = 0
 
 
 # --------------------------------------------------------------------------- #
@@ -1611,26 +1642,19 @@ def _do_ping(cfg: dict, args, targets: list, save=None) -> list:
     if not use_json:
         section(_ping_header(cfg, eff, args))
     results = []
-    for tg in targets:
+    total = len(targets)
+    for i, tg in enumerate(targets, 1):
         if not use_json:
-            print("  " + t("正在 ping {t} ...", "Pinging {t} ...").format(t=col(tg, "bold")))
+            progress("  " + t(f"({i}/{total}) 正在 ping {col(tg, 'bold')} ...",
+                              f"({i}/{total}) pinging {col(tg, 'bold')} ..."))
         r = ping_target(tg, cfg, eff["count"], eff["interval"], eff["timeout"],
                         eff["size"], eff["method"])
         results.append(r)
-        if not use_json:
-            loss = r.get("loss")
-            avg = r.get("avg")
-            if isinstance(avg, (int, float)) and isinstance(loss, (int, float)):
-                print("    -> " + t("{ip}  平均 {avg:.2f} ms  遺失 {loss:.1f}%",
-                                    "{ip}  avg {avg:.2f} ms  loss {loss:.1f}%").format(
-                    ip=r.get("ip") or tg, avg=avg, loss=loss))
-            else:
-                print("    -> " + t("{ip}  無回應", "{ip}  no response").format(
-                    ip=r.get("ip") or tg))
     if use_json:
+        progress_end()
         print(json.dumps(results, ensure_ascii=False, indent=2))
     else:
-        print()
+        progress_end()
         print_ping_table(results)
     if not no_save and results:
         rec = {"kind": "ping", "params": dict(eff),
@@ -1828,12 +1852,16 @@ def _resolve_sources(cfg: dict, args) -> list:
 
 
 def cmd_source(name: str, cfg: dict, args) -> dict:
+    label = SOURCE_LABELS.get(name, name)
     if not getattr(args, "json", False):
-        section(t("測速 - ", "Speed - ") + SOURCE_LABELS.get(name, name))
+        section(t("測速 - ", "Speed - ") + label)
+        progress("  " + t(f"(1/1) 測速中 {label} ...", f"(1/1) testing {label} ..."))
     res = run_source(name, cfg, args)
     if getattr(args, "json", False):
+        progress_end()
         print(json.dumps(res, ensure_ascii=False, indent=2))
     else:
+        progress_end()
         print_speed_result(res)
     if not getattr(args, "no_save", False) and not res.get("error"):
         append_history(_speed_record([res]), cfg)
@@ -1845,15 +1873,23 @@ def cmd_speed_all(cfg: dict, args) -> list:
     sources = _resolve_sources(cfg, args)
     use_json = getattr(args, "json", False)
     results = []
-    for name in sources:
+    total = len(sources)
+    if not use_json:
+        section(t("測速中", "Speed test"))
+    for i, name in enumerate(sources, 1):
+        if not use_json:
+            progress("  " + t(f"({i}/{total}) 測速中 {SOURCE_LABELS.get(name, name)} ...",
+                              f"({i}/{total}) testing {SOURCE_LABELS.get(name, name)} ..."))
         try:
             res = run_source(name, cfg, args)
         except Exception as exc:  # noqa: BLE001
             res = {"source": name, "error": str(exc)}
         results.append(res)
     if use_json:
+        progress_end()
         print(json.dumps(results, ensure_ascii=False, indent=2))
     else:
+        progress_end()
         print_speed_table(results)
         section(t("測速完成", "Speed test complete"))
         print(f"  {t('時間', 'Time')}: {now_iso()}")
@@ -1875,7 +1911,13 @@ def cmd_all(cfg: dict, args) -> dict:
     if not getattr(args, "no_ping", False):
         collected["ping"] = _do_ping(cfg, args, resolve_ping_targets(cfg, []), save=False)
 
-    for name in sources:
+    total = len(sources)
+    if not use_json:
+        section(t("測速中", "Speed test"))
+    for i, name in enumerate(sources, 1):
+        if not use_json:
+            progress("  " + t(f"({i}/{total}) 測速中 {SOURCE_LABELS.get(name, name)} ...",
+                              f"({i}/{total}) testing {SOURCE_LABELS.get(name, name)} ..."))
         try:
             res = run_source(name, cfg, args)
         except Exception as exc:  # noqa: BLE001
@@ -1883,8 +1925,10 @@ def cmd_all(cfg: dict, args) -> dict:
         collected["speed"].append(res)
 
     if use_json:
+        progress_end()
         print(json.dumps(collected, ensure_ascii=False, indent=2))
     else:
+        progress_end()
         print_speed_table(collected["speed"])
         section(t("統整完成", "Summary complete"))
         print(f"  {t('時間', 'Time')}: {now_iso()}")
